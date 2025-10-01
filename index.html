@@ -23,7 +23,9 @@
 
         // Check for environment variables (Canvas/Platform)
         const appId = typeof __app_id !== 'undefined' ? __app_id : MANUAL_FAMILY_ID;
+        // Firebase configuration is loaded securely from the environment
         const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : (typeof MANUAL_FIREBASE_CONFIG !== 'undefined' ? MANUAL_FIREBASE_CONFIG : null);
+        // Authentication token is loaded securely from the environment
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         
         let db;
@@ -589,7 +591,8 @@
             } else {
                 window.saveLocalData(monthKey, dataToSave);
             }
-            window.updateSyncStatus('क्लाउड बचत सफल! (साझा डाटा)', 'Success');
+            // FIX: Ensure DOM elements are available before updating status
+            setTimeout(() => window.updateSyncStatus('क्लाउड बचत सफल! (साझा डाटा)', 'Success'), 0);
         }
         
         // Function to save global loan configuration (Name, Principal, Rate, Years, Start Date)
@@ -729,7 +732,8 @@
         window.loadLocalData = function(monthKey) {
             const monthlyDataString = localStorage.getItem(`gharti_finances_${monthKey}`);
             loadMonthlyData(monthlyDataString);
-            window.updateSyncStatus(`${monthKey} को डाटा Local Storage बाट लोड भयो। (Local Storage मोड)`, 'Local');
+            // FIX: Ensure DOM elements are available before updating status
+            setTimeout(() => window.updateSyncStatus(`${monthKey} को डाटा Local Storage बाट लोड भयो। (Local Storage मोड)`, 'Local'), 0);
         }
         
         window.saveLocalData = function(monthKey, data) {
@@ -860,7 +864,7 @@
 
         // --- AUTHENTICATION AND INITIALIZATION ---
         
-        // FIX: Renamed initFirebase to window.init and moved the call to body onload
+        // This function handles Firebase initialization and user authentication.
         window.init = async function() {
             initMonthSelectors();
             
@@ -872,30 +876,34 @@
                     db = getFirestore(app);
                     auth = getAuth(app);
                     
+                    // --- CORE AUTHENTICATION LOGIC ---
+                    // Tries to sign in with the provided token (for verified users), 
+                    // otherwise signs in anonymously for basic access.
                     if (initialAuthToken) {
                         await signInWithCustomToken(auth, initialAuthToken);
                     } else {
                         await signInAnonymously(auth);
                     }
+                    // --- END CORE AUTHENTICATION LOGIC ---
                     
                     userId = auth.currentUser?.uid || 'default-shared-user';
                     
                     if(familyCodeEl) familyCodeEl.textContent = appId;
-                    // Fix: Deferred status update to ensure DOM elements are fully available.
+                    // FIX: Deferred status update to ensure DOM elements are fully available.
                     setTimeout(() => window.updateSyncStatus('क्लाउड जडान भयो। (Shared Data)', 'Success'), 0);
 
                 } catch (error) {
                     console.error("Firebase Initialization Error:", error);
                     db = null;
                     if(familyCodeEl) familyCodeEl.textContent = 'LOCAL-MODE';
-                    // Fix: Deferred status update for error case.
+                    // FIX: Deferred status update for error case.
                     setTimeout(() => window.updateSyncStatus('त्रुटि: क्लाउड जडान टुट्यो। (Local Storage मोड)', 'Error'), 0);
                 }
             } else {
                 db = null;
                 userId = MANUAL_FAMILY_ID;
                 if(familyCodeEl) familyCodeEl.textContent = MANUAL_FAMILY_ID || 'LOCAL-MODE';
-                // Fix: Deferred status update for missing config case.
+                // FIX: Deferred status update for missing config case.
                 setTimeout(() => window.updateSyncStatus('त्रुटि: Firebase कन्फिग हराइरहेको छ। (Local Storage मोड)', 'Error'), 0);
             }
             
