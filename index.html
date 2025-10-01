@@ -3,824 +3,1109 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>घर्ती परिवारको वित्तीय व्यवस्थापन ड्यासबोर्ड (बिक्रम सम्बत्)</title>
+    <title>घर्ती परिवारको वित्तीय व्यवस्थापन ड्यासबोर्ड (बिक्रम सम्बत्) - बहु-ऋण</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script type="module">
         // Firebase Imports
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase Logging (for debugging)
+        setLogLevel('Debug');
+
+        // --- GLOBAL CONFIGURATION (MANDATORY FOR GITHUB DEPLOYMENT) ---
         
-        // =========================================================================
-        // --- 1. FIREBASE CONFIGURATION & ID MANAGEMENT ---
-        //
-        // NOTE: When deployed externally (like GitHub Pages), you MUST uncomment 
-        // and fill in the two manual constants below to enable Cloud Firestore sync.
-        // =========================================================================
-
-        // 🚨 ACTION REQUIRED: UNCOMMENT AND REPLACE PLACEHOLDERS BELOW! 🚨
-        const MANUAL_FIREBASE_CONFIG = {
-            apiKey: "YOUR_API_KEY", // Replace with your Firebase Web API Key
-            authDomain: "YOUR_PROJECT_ID.firebaseapp.com", // Replace with your Project ID
-            projectId: "YOUR_PROJECT_ID", // Replace with your Project ID
-            // Add other config keys (storageBucket, messagingSenderId, appId) if needed
-        };
-        const MANUAL_FAMILY_ID = "GHARTI-FAMILY-CODE"; // <--- Set a unique family ID/Code here (e.g., 'GHARTI-FAMILY-2082')
-        const MANUAL_AUTH_TOKEN = null; // Leave as null unless you are using a custom auth setup
-
-        // --- CANVAS PROVIDED CONFIGURATION (Default) ---
-        const canvasAppId = typeof __app_id !== 'undefined' ? __app_id : null;
-        const canvasFirebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-        const canvasAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-        // Determine which set of configurations to use
-        const useManualConfig = typeof MANUAL_FIREBASE_CONFIG !== 'undefined' && MANUAL_FIREBASE_CONFIG.projectId && MANUAL_FIREBASE_CONFIG.projectId !== 'YOUR_PROJECT_ID'; // Added check to ensure it's filled
-
-        const familyId = useManualConfig 
-            ? MANUAL_FAMILY_ID 
-            : canvasAppId || 'local-app-id'; // Use canvas ID or local fallback
-
-        const firebaseConfig = useManualConfig 
-            ? MANUAL_FIREBASE_CONFIG 
-            : canvasFirebaseConfig;
-
-        const initialAuthToken = useManualConfig
-            ? MANUAL_AUTH_TOKEN
-            : canvasAuthToken;
-
-
-        // --- Global Firebase & Auth Setup ---
-        let app, db, auth;
-        let currentUserId = null;
-        let isAuthReady = false;
-        let unsubscribeSnapshot = null;
-        let saveTimeout = null;
-        let isLocalMode = false; 
+        const MANUAL_FAMILY_ID = 'GHARTI-FINANCES'; // Use a unique family code (e.g., 'GHARTI-2082')
         
-        const syncStatusEl = document.getElementById('syncStatus');
-        const bsYearSelector = document.getElementById('bsYearSelector');
-        const bsMonthSelector = document.getElementById('bsMonthSelector');
-        const familyCodeDisplayEl = document.getElementById('familyCodeDisplay'); 
+        // --- END GLOBAL CONFIGURATION ---
 
-        // Display the calculated Family ID
-        if (familyCodeDisplayEl) {
-            familyCodeDisplayEl.textContent = familyId.toUpperCase();
-        }
+        // Check for environment variables (Canvas/Platform)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : MANUAL_FAMILY_ID;
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : (typeof MANUAL_FIREBASE_CONFIG !== 'undefined' ? MANUAL_FIREBASE_CONFIG : null);
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         
-        /**
-         * Generates the unique internal key (BS_YYYY-MM_Index) for Firestore/LocalStorage.
-         * @returns {string} The unique month key (e.g., '2082-01')
-         */
-        function getMonthKey() {
-            const year = bsYearSelector.value;
-            // Month index is 0-11, so we add 1 and pad to 2 digits (01-12)
-            const monthIndex = parseInt(bsMonthSelector.value) + 1;
-            const monthKey = `${year}-${monthIndex.toString().padStart(2, '0')}`;
-            return monthKey;
-        }
+        let db;
+        let auth;
+        let userId = 'local_user';
+        let currentYearBs = 2082;
+        let currentMonthBs = 1; // Baisakh (बैशाख)
 
-        /**
-         * Initializes Firebase and authenticates the user.
-         */
-        async function initFirebase() {
-            // Check if MANUAL config was provided OR if Canvas config is present
-            if (Object.keys(firebaseConfig).length === 0 || !firebaseConfig.projectId) {
-                console.warn("Running in local mode: Firebase configuration missing or incomplete.");
-                isAuthReady = true; 
-                isLocalMode = true; 
-                currentUserId = 'local_user'; 
-                syncStatusEl.textContent = 'त्रुटि: Firebase कन्फिग हराइरहेको छ। (Local Storage मोड)';
-                window.loadMonthData(getMonthKey()); 
-                return; 
-            }
-            
-            try {
-                app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
-                
-                if (initialAuthToken) {
-                    await signInWithCustomToken(auth, initialAuthToken);
-                } else {
-                    // Use anonymous sign-in for public/unauthenticated access
-                    await signInAnonymously(auth);
-                }
-
-                onAuthStateChanged(auth, (user) => {
-                    if (user) {
-                        currentUserId = user.uid;
-                        isAuthReady = true;
-                        // Status message updated to reflect shared data
-                        syncStatusEl.textContent = 'क्लाउड जडान भयो। (साझा डाटा)'; 
-                        window.loadMonthData(getMonthKey());
-                    } else {
-                        currentUserId = crypto.randomUUID(); 
-                        isAuthReady = true;
-                        syncStatusEl.textContent = 'अतिथि मोडमा जडान भयो।';
-                        window.loadMonthData(getMonthKey());
-                    }
-                });
-
-            } catch (error) {
-                console.error("Error initializing Firebase or signing in:", error);
-                syncStatusEl.textContent = 'जडान असफल: ' + error.message;
-            }
-        }
-        
-        // --- LOCAL STORAGE Data Management ---
-
-        function saveLocalData(monthKey) {
-            const dataToSave = { income: getCurrentList('income'), expense: getCurrentList('expense') };
-            try {
-                const storageKey = `fm_data_${monthKey}`;
-                localStorage.setItem(storageKey, JSON.stringify(dataToSave));
-                // Status message update to ensure consistency
-                const yearMonthDisplay = monthKey.substring(0, 7); // e.g., '2082-01'
-                syncStatusEl.textContent = `${yearMonthDisplay} को डाटा Local Storage मा बचत भयो।`;
-            } catch (e) {
-                console.error("Error saving to localStorage:", e);
-                syncStatusEl.textContent = 'Local Storage मा बचत असफल।';
-            }
-        }
-
-        function loadLocalData(monthKey) {
-            try {
-                const storageKey = `fm_data_${monthKey}`;
-                const storedData = localStorage.getItem(storageKey);
-                const yearMonthDisplay = monthKey.substring(0, 7); // e.g., '2082-01'
-
-                if (storedData) {
-                    const data = JSON.parse(storedData);
-                    populateLists(data.income || [], data.expense || []);
-                    // Updated status message to match user request: '2082-01 को डाटा Local Storage बाट लोड भयो।'
-                    syncStatusEl.textContent = `${yearMonthDisplay} को डाटा Local Storage बाट लोड भयो।`;
-                } else {
-                    // FIX: If no data is found, load empty lists instead of the same initialData
-                    populateLists([], []); 
-                    syncStatusEl.textContent = `${yearMonthDisplay} को लागि कुनै डाटा फेला परेन। नयाँ प्रविष्टि सुरु गर्नुहोस्।`;
-                }
-            } catch (e) {
-                console.error("Error loading from localStorage:", e);
-                // We keep initialData as a backup if loading fails completely, but not for new months.
-                populateLists(initialData.income, initialData.expense); 
-                syncStatusEl.textContent = 'Local Storage लोड गर्न असफल, पूर्वनिर्धारित डाटा प्रयोग गरियो।';
-            }
-        }
-
-        // --- Firestore Data Management ---
-
-        /**
-         * Gets the Firestore Document Reference for shared family data.
-         * Data path uses the familyId for collaboration among all family members.
-         */
-        function getDocRef(monthKey) {
-            if (!db || isLocalMode) return null; 
-            
-            // Public shared data path: /artifacts/{familyId}/public/data/gharti_finances/{monthKey}
-            const collectionName = 'gharti_finances'; 
-            // We use the familyId (which comes from __app_id or MANUAL_FAMILY_ID) as the top-level artifact ID
-            const docPath = `/artifacts/${familyId}/public/data/${collectionName}/${monthKey}`;
-            const docRef = doc(db, docPath);
-            return { docRef };
-        }
-
-        /**
-         * Saves the current cash flow data to Firestore (or localStorage).
-         */
-        function saveMonthData() {
-            const monthKey = getMonthKey();
-            if (isLocalMode) {
-                saveLocalData(monthKey);
-                return;
-            }
-
-            if (!isAuthReady || !db) {
-                return;
-            }
-            
-            clearTimeout(saveTimeout);
-            saveTimeout = setTimeout(async () => {
-                const docData = getDocRef(monthKey);
-                if (!docData) return;
-                const { docRef } = docData;
-
-                syncStatusEl.textContent = 'क्लाउडमा डाटा बचत गर्दै...';
-                
-                const dataToSave = {
-                    income: getCurrentList('income'),
-                    expense: getCurrentList('expense'),
-                };
-
-                try {
-                    await setDoc(docRef, dataToSave, { merge: true });
-                    syncStatusEl.textContent = 'क्लाउड बचत सफल! (' + new Date().toLocaleTimeString('ne-NP') + ')';
-                } catch (e) {
-                    console.error("Error saving document: ", e);
-                    syncStatusEl.textContent = 'क्लाउड बचत असफल: ' + e.message.substring(0, 50) + '...';
-                }
-            }, 1000); 
-        }
-        window.saveMonthData = saveMonthData; 
-
-        /**
-         * Fetches and listens for real-time data for the given month from Firestore (or localStorage).
-         */
-        window.loadMonthData = function(monthKey) {
-             if (!isAuthReady) {
-                return;
-            }
-            
-            if (isLocalMode) {
-                loadLocalData(monthKey);
-                return;
-            }
-
-            if (unsubscribeSnapshot) {
-                unsubscribeSnapshot();
-                unsubscribeSnapshot = null;
-            }
-
-            const docData = getDocRef(monthKey);
-            if (!docData) return;
-            const { docRef } = docData;
-
-            syncStatusEl.textContent = `B.S. ${monthKey.split('-')[0]} ${nepaliMonths[parseInt(monthKey.split('-')[1]) - 1]} को डाटा क्लाउडबाट लोड गर्दै...`;
-            
-            unsubscribeSnapshot = onSnapshot(docRef, (docSnap) => {
-                if (docSnap.exists()) {
-                    const data = docSnap.data();
-                    populateLists(data.income || [], data.expense || []);
-                    syncStatusEl.textContent = `B.S. ${monthKey.split('-')[0]} ${nepaliMonths[parseInt(monthKey.split('-')[1]) - 1]} को साझा डाटा सफलतापूर्वक लोड भयो।`;
-                } else {
-                    console.log(`No data found for ${monthKey}. Starting blank.`);
-                    // FIX: If no data exists, load empty lists instead of the same initialData
-                    populateLists([], []); 
-                    // Do not auto-save. Let the user input data which triggers a save later.
-                    syncStatusEl.textContent = `B.S. ${monthKey.split('-')[0]} ${nepaliMonths[parseInt(monthKey.split('-')[1]) - 1]} को लागि कुनै साझा डाटा फेला परेन। नयाँ महिना सुरु गर्नुहोस्।`;
-                }
-            }, (error) => {
-                console.error("Snapshot error:", error);
-                syncStatusEl.textContent = 'साझा डाटा सुन्न असफल: ' + error.message;
-            });
-        }
-        
-        // --- BIKRAM SAMBAT (BS) UI LOGIC ---
-        
-        const nepaliMonths = [
-            "वैशाख (Baisakh)", "जेठ (Jestha)", "असार (Ashar)", "श्रावण (Shrawan)", 
-            "भदौ (Bhadra)", "असोज (Ashwin)", "कार्तिक (Kartik)", "मंसिर (Mangsir)", 
-            "पुस (Poush)", "माघ (Magh)", "फाल्गुन (Falgun)", "चैत्र (Chaitra)"
+        const bsMonths = [
+            'बैशाख (01)', 'जेठ (02)', 'असार (03)', 'श्रावण (04)', 'भदौ (05)', 'असोज (06)',
+            'कार्तिक (07)', 'मंसिर (08)', 'पुस (09)', 'माघ (10)', 'फाल्गुन (11)', 'चैत (12)'
         ];
 
-        /**
-         * Populates the year and month selectors with BS data.
-         */
-        function setupBSSelectors() {
-            // Populate BS Year Selector (from 2075 to 2085)
-            const currentBSYear = 2082; // Assuming current year is 2082 B.S. for initialization
-            const currentBSMonthIndex = 0; // Assuming Baisakh (index 0)
-
-            for (let y = 2075; y <= 2085; y++) {
-                const option = document.createElement('option');
-                option.value = y;
-                option.textContent = y;
-                bsYearSelector.appendChild(option);
-            }
-            bsYearSelector.value = currentBSYear;
-
-            // Populate BS Month Selector
-            nepaliMonths.forEach((month, index) => {
-                const option = document.createElement('option');
-                option.value = index; // Store index 0-11
-                option.textContent = month;
-                bsMonthSelector.appendChild(option);
-            });
-            bsMonthSelector.value = currentBSMonthIndex; // Set default month
-
-            // Add change listener to both selectors
-            const selectorChangeListener = () => {
-                // When month or year changes, load new data
-                if (isAuthReady) {
-                    window.loadMonthData(getMonthKey());
-                }
-            };
-
-            bsYearSelector.addEventListener('change', selectorChangeListener);
-            bsMonthSelector.addEventListener('change', selectorChangeListener);
-        }
+        // Unique document path for monthly data (Income/Expense/Monthly Extra Payments)
+        const getMonthDocPath = (year, month) => {
+            const familyId = userId; 
+            const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+            // Public path for shared family data
+            return `artifacts/${appId}/public/data/gharti_finances/${monthKey}`;
+        };
         
-        /**
-         * Changes the selected month and year in the BS selectors.
-         * @param {number} direction - -1 for previous month, 1 for next month.
-         */
-        window.changeMonth = function(direction) {
-            let currentYear = parseInt(bsYearSelector.value);
-            let currentMonthIndex = parseInt(bsMonthSelector.value); // 0 to 11
+        // Unique document path for persistent loan configuration (used across all months)
+        const getLoanConfigDocPath = () => {
+             return `artifacts/${appId}/public/data/gharti_loans_config/global`;
+        };
 
-            let newMonthIndex = currentMonthIndex + direction;
-            let newYear = currentYear;
-            
-            const minYear = 2075;
-            const maxYear = 2085;
+        // --- INITIAL DATA STRUCTURES ---
 
-            // Handle year rollovers
-            if (newMonthIndex < 0) {
-                newMonthIndex = 11; // December (Chaitra)
-                newYear--;
-            } else if (newMonthIndex > 11) {
-                newMonthIndex = 0; // January (Baisakh)
-                newYear++;
-            }
-            
-            // Check boundaries
-            if (newYear < minYear || newYear > maxYear) {
-                // Show a brief message without using alert/confirm
-                syncStatusEl.textContent = `सिमाना पुग्यो! डाटा ${minYear} देखि ${maxYear} B.S. सम्म मात्र उपलब्ध छ।`;
-                return;
-            }
+        const initialLoanConfig = {
+            id: crypto.randomUUID(), // Unique ID for each loan
+            name: "नयाँ ऋण",
+            principal: 1000000,
+            rate: 10.0,
+            years: 5,
+            startDateYear: 2082,
+            startDateMonth: 1, 
+            extraPrincipal: 0 // This is the monthly extra payment for the currently selected month
+        };
 
-            // Update selectors. This will automatically trigger the data load via the existing change listener.
-            bsYearSelector.value = newYear;
-            bsMonthSelector.value = newMonthIndex;
-            
-            // Manually trigger load if the change event doesn't fire (sometimes happens when setting .value)
-            if (isAuthReady) {
-                window.loadMonthData(getMonthKey());
-            }
-        }
-        
-        /**
-         * Copies the Family Code (appId) to the clipboard.
-         */
-        window.copyFamilyCode = function() {
-            const code = familyId.toUpperCase(); // Use the determined familyId
-            
-            // Fallback for clipboard API which might not work in iframe
-            try {
-                const el = document.createElement('textarea');
-                el.value = code;
-                document.body.appendChild(el);
-                el.select();
-                document.execCommand('copy');
-                document.body.removeChild(el);
-                syncStatusEl.textContent = `कोड ('${code}') सफलतापूर्वक कपी भयो!`;
-            } catch (err) {
-                syncStatusEl.textContent = 'कपी गर्न असफल भयो, कोडलाई म्यानुअल रूपमा कपी गर्नुहोस्।';
-                console.error('Copy failed:', err);
-            }
-        }
-        
-        /**
-         * Navigates to the file source (placeholder for GitHub/Canvas URL).
-         */
-        window.viewSource = function() {
-            const githubUrl = "YOUR_GITHUB_REPOSITORY_URL_HERE"; // <<< Fill this URL when deploying to GitHub Pages
-
-            if (githubUrl.includes("YOUR_GITHUB_REPOSITORY_URL_HERE")) {
-                syncStatusEl.textContent = "कृपया GitHub मा डिप्लोय गरेपछि यो बटनमा URL भर्नुहोस्!";
-            } else {
-                window.open(githubUrl, '_blank');
-            }
-        }
-
-
-        // Initial setup on DOM load
-        document.addEventListener('DOMContentLoaded', () => {
-            setupBSSelectors(); // Setup the Nepali Calendar UI
-            initFirebase(); // Start Firebase initialization
-            calculateConsolidation(); // Initial consolidation calculation
-        });
-        
-    </script>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=Mukta:wght@200;300;400;500;600;700;800&display=swap');
-        body {
-            font-family: 'Mukta', 'Inter', sans-serif;
-            background-color: #f7f9fc;
-        }
-        .card {
-            background-color: #ffffff;
-            border-radius: 0.75rem; /* rounded-xl */
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 4px, 6px, 0.05);
-            padding: 1.5rem;
-        }
-        .input-field, .summary-text, select {
-            border-radius: 0.5rem;
-            border: 1px solid #d1d5db;
-            transition: border-color 0.15s ease-in-out;
-        }
-        .input-field:focus, select:focus {
-            border-color: #4f46e5; /* indigo-600 */
-        }
-        .income-row, .expense-row {
-            transition: background-color 0.2s;
-        }
-        .income-row:focus-within, .expense-row:focus-within {
-            background-color: #f0f9ff; /* blue-50 */
-        }
-    </style>
-</head>
-<body class="p-4 sm:p-6 md:p-8">
-
-    <div class="max-w-4xl mx-auto">
-        <h1 class="text-3xl font-bold text-center text-indigo-700 mb-6">घर्ती परिवारको वित्तीय व्यवस्थापन ड्यासबोर्ड</h1>
-        <p class="text-center text-gray-600 mb-4">आम्दानी, खर्च र ऋणको विवरणहरू यहाँ भर्नुहोस्।</p>
-
-        <!-- Control Bar (Family Code, Month Selector, Export, Sync Status) -->
-        <div class="card mb-6 flex flex-col md:flex-row items-center justify-between p-4 bg-white border-b-2 border-indigo-100 space-y-4 md:space-y-0">
-            
-            <!-- Family Sharing Info (Top-left) -->
-            <div class="w-full md:w-1/3 text-center md:text-left">
-                <p class="text-xs text-gray-500 font-semibold mb-1">परिवारको साझा डाटा कोड (Family Code):</p>
-                <div class="flex items-center justify-center md:justify-start space-x-2">
-                    <!-- Family Code Display -->
-                    <span id="familyCodeDisplay" class="font-mono text-base font-extrabold text-purple-700 bg-purple-100 p-1.5 rounded-md border border-purple-300">Loading...</span>
-                    <!-- Copy Button -->
-                    <button onclick="copyFamilyCode()" title="कोड कपी गर्नुहोस्" class="text-gray-500 hover:text-indigo-600 transition duration-150">
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-2m-4-6l-7-7m0 0a2 2 0 012.828 0L14 7.172"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 11V7a2 2 0 00-2-2H9a2 2 0 00-2 2v4"></path></svg>
-                    </button>
-                </div>
-                <p class="text-xs text-red-500 mt-1">यो कोड अन्य सदस्यसँग साझा गर्नुहोस्।</p>
-            </div>
-
-            <!-- Bikram Sambat Selectors (Center) -->
-            <div class="flex items-center space-x-2 sm:space-x-4 w-full md:w-1/3 justify-center">
-                <label class="font-bold text-gray-700 whitespace-nowrap">मासिक डाटा (B.S.):</label>
-                <select id="bsYearSelector" class="input-field p-2 text-base font-mono focus:ring-indigo-500 focus:border-indigo-500"></select>
-                <select id="bsMonthSelector" class="input-field p-2 text-base font-mono focus:ring-indigo-500 focus:border-indigo-500"></select>
-            </div>
-            
-            <!-- Export and Sync Status (Right) -->
-            <div class="flex flex-col items-end w-full md:w-1/3 space-y-2">
-                <div class="flex space-x-2">
-                    <!-- Export Button -->
-                    <button onclick="exportDataAsCSV()" class="bg-indigo-500 text-white px-3 py-1.5 rounded-lg hover:bg-indigo-600 transition duration-150 ease-in-out text-sm font-medium">
-                        डाटा निर्यात गर्नुहोस् (CSV)
-                    </button>
-                    <!-- View Source Button (New) -->
-                    <button onclick="viewSource()" id="viewSourceButton" title="फाइलको स्रोत हेर्नुहोस् (GitHub URL भर्नुहोस्)" class="bg-gray-100 text-gray-600 px-3 py-1.5 rounded-lg hover:bg-gray-200 transition duration-150 ease-in-out text-sm font-medium shadow-md">
-                        <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>
-                        स्रोत
-                    </button>
-                </div>
-                <span id="syncStatus" class="text-sm italic text-indigo-500">डाटा जडानको लागि पर्खँदै...</span>
-            </div>
-        </div>
-
-        <!-- Main Grid Layout -->
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            
-            <!-- Monthly Cash Flow Management -->
-            <div class="lg:col-span-2">
-                <div class="card">
-                    <h2 class="text-2xl font-semibold text-gray-800 border-b pb-3 mb-4 text-indigo-600">मासिक आम्दानी र खर्च (Monthly Cash Flow)</h2>
-                    <p class="text-sm text-gray-500 mb-4">तथ्याङ्कहरू परिवर्तन गर्दा **स्वतः गणना र क्लाउडमा बचत** हुनेछ। (Family Code प्रयोग गरी साझा गरिएको डाटा)</p>
-
-                    <div class="flex justify-between font-bold text-lg mb-2 pt-2 border-t">
-                        <span class="w-1/2">शीर्षक</span>
-                        <span class="w-1/2 text-right">रकम (रु.)</span>
-                    </div>
-
-                    <!-- Income Section -->
-                    <h3 class="text-xl font-medium text-green-700 mt-4 mb-2">आम्दानी (Earnings)</h3>
-                    <div id="incomeList" class="space-y-2">
-                        <!-- Income rows will be injected here -->
-                    </div>
-                    <div class="flex justify-end mt-4">
-                        <button onclick="addListItem('income')" class="text-sm text-indigo-600 hover:text-indigo-800 transition duration-150 ease-in-out font-medium">
-                            + आम्दानीको स्रोत थप्नुहोस्
-                        </button>
-                    </div>
-                    
-                    <!-- Expense Section -->
-                    <h3 class="text-xl font-medium text-red-700 mt-6 mb-2 border-t pt-4">खर्च/किस्ताहरू (Liabilities)</h3>
-                    <div id="expenseList" class="space-y-2">
-                        <!-- Expense rows will be injected here -->
-                    </div>
-                    <div class="flex justify-end mt-4">
-                        <button onclick="addListItem('expense')" class="text-sm text-indigo-600 hover:text-indigo-800 transition duration-150 ease-in-out font-medium">
-                            + खर्च/किस्ता थप्नुहोस्
-                        </button>
-                    </div>
-
-                    <!-- Summary -->
-                    <div class="mt-8 pt-4 border-t-2 border-dashed border-gray-300">
-                        <div class="flex justify-between items-center text-lg font-bold text-gray-700 py-2">
-                            <span>जम्मा आम्दानी:</span>
-                            <span id="totalIncome" class="summary-text bg-green-100 p-2 text-green-700">0</span>
-                        </div>
-                        <div class="flex justify-between items-center text-lg font-bold text-gray-700 py-2">
-                            <span>जम्मा खर्च:</span>
-                            <span id="totalExpense" class="summary-text bg-red-100 p-2 text-red-700">0</span>
-                        </div>
-                        <div class="flex justify-between items-center text-xl font-extrabold mt-4 py-3 rounded-lg" id="netFlowContainer">
-                            <span>मासिक बचत/घाटा (Net Cash Flow):</span>
-                            <span id="netFlow" class="summary-text p-3">0</span>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Month Navigation Buttons at the bottom -->
-                <div class="flex justify-between mt-4 p-4">
-                    <button onclick="changeMonth(-1)" class="flex items-center space-x-2 bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300 transition duration-150 ease-in-out font-medium shadow-md">
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
-                        <span>अघिल्लो महिना</span>
-                    </button>
-                    <button onclick="changeMonth(1)" class="flex items-center space-x-2 bg-indigo-500 text-white px-4 py-2 rounded-lg hover:bg-indigo-600 transition duration-150 ease-in-out font-medium shadow-md">
-                        <span>अर्को महिना</span>
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path></svg>
-                    </button>
-                </div>
-            </div>
-
-            <!-- Loan Consolidation Proposal (Scenario Analysis) -->
-            <div class="card lg:col-span-2">
-                <h2 class="text-2xl font-semibold text-gray-800 border-b pb-3 mb-4 text-indigo-600">ऋण समायोजन प्रस्ताव (Loan Consolidation Proposal)</h2>
-
-                <div class="space-y-4">
-                    <div class="flex justify-between items-center p-3 rounded-lg bg-yellow-50">
-                        <label for="currentTotalDebt" class="font-medium text-gray-700 w-1/2">हालको जम्मा तिर्नुपर्ने ऋण (रु. 27,25,000/-):</label>
-                        <input type="number" id="currentTotalDebt" value="2725000" class="input-field p-2 w-1/2 text-right" oninput="calculateConsolidation()">
-                    </div>
-
-                    <div class="flex justify-between items-center p-3 rounded-lg bg-yellow-50">
-                        <label for="proposedNewLoan" class="font-medium text-gray-700 w-1/2">प्रस्तावित नयाँ ऋण (रु. 30,00,000/-):</label>
-                        <input type="number" id="proposedNewLoan" value="3000000" class="input-field p-2 w-1/2 text-right" oninput="calculateConsolidation()">
-                    </div>
-                </div>
-
-                <div class="mt-6 pt-4 border-t-2 border-dashed border-gray-300">
-                    <h3 class="text-xl font-medium text-gray-800 mb-4">मासिक किस्ता भारको विश्लेषण:</h3>
-
-                    <div class="flex justify-between items-center py-2">
-                        <span class="font-semibold text-gray-600">हालको अनुमानित मासिक किस्ता भार:</span>
-                        <span id="currentMonthlyBurden" class="font-semibold text-red-600 text-lg">77,000</span>
-                    </div>
-
-                    <div class="flex justify-between items-center py-2">
-                        <span class="font-semibold text-gray-600">प्रस्तावित नयाँ मासिक किस्ता भार:</span>
-                        <span id="proposedMonthlyBurden" class="font-semibold text-green-600 text-lg">44,000</span>
-                    </div>
-
-                    <div class="flex justify-between items-center text-xl font-extrabold mt-4 py-3 rounded-lg" id="monthlySavingContainer">
-                        <span>मासिक बचत (Potential Monthly Saving):</span>
-                        <span id="monthlySaving" class="p-2">33,000</span>
-                    </div>
-                </div>
-
-                <p class="text-sm text-gray-500 mt-4 italic">
-                    <strong class="font-bold">आधार:</strong> हालको भार (रु. 52,000 + ढिकुरी किस्ता रु. 25,000 = रु. 77,000) र नयाँ प्रस्ताव (रु. 44,000) को आधारमा गणना गरिएको।
-                </p>
-            </div>
-
-        </div>
-    </div>
-
-    <script>
-        // Initial Data - Kept here for reference, but no longer auto-loaded for every new month
         const initialData = {
-            income: [
-                { name: 'पेन्सन (Pension)', amount: 35000, type: 'income' },
-                { name: 'अन्य आम्दानी (Other Income)', amount: 25000, type: 'income' },
-                { name: 'Gobin (Other Source)', amount: 40000, type: 'income' },
-                { name: 'पसलबाट नाफा (Profit on Sale)', amount: 10000, type: 'income' },
+            incomes: [{ name: "प्रमुख आय स्रोत", amount: 0 }],
+            expenses: [
+                { name: "घर भाडा/किस्ता", amount: 0 },
+                { name: "खाद्यान्न", amount: 0 },
+                { name: "उपयोगिता (बिजुली/पानी)", amount: 0 },
+                { name: "शिक्षा", amount: 0 },
+                { name: "परिवहन", amount: 0 },
+                { name: "विविध", amount: 0 }
             ],
-            expense: [
-                { name: 'Global PL + TKK + B&T (मुख्य किस्ता)', amount: 57000, type: 'expense' },
-                { name: 'CYC-1 किस्ता (CYC Installment)', amount: 5000, type: 'expense' },
-                { name: 'भुपु किस्ता (Bhupu Installment)', amount: 28300, type: 'expense' },
-                { name: 'ढिकुरी किस्ता (Dhikuri Installment)', amount: 25000, type: 'expense' },
-                { name: 'समूह NMB किस्ता (Group Loan)', amount: 15000, type: 'expense' },
-                { name: 'घर खर्च (Household Expenses)', amount: 10000, type: 'expense' },
-                { name: 'बिपिन खर्च (Bipin’s Expenses)', amount: 8000, type: 'expense' },
+            // Dynamic loan configurations will be loaded/saved here
+            loans: [
+                 // Pre-populate with a sample loan
+                 {...initialLoanConfig, id: crypto.randomUUID(), name: "गृह ऋण", principal: 2725000, rate: 12.0, years: 10}
             ]
         };
 
-        const incomeList = document.getElementById('incomeList');
-        const expenseList = document.getElementById('expenseList');
-        const totalIncomeEl = document.getElementById('totalIncome');
-        const totalExpenseEl = document.getElementById('totalExpense');
-        const netFlowEl = document.getElementById('netFlow');
-        const netFlowContainer = document.getElementById('netFlowContainer');
-        const monthlySavingEl = document.getElementById('monthlySaving');
-        // Note: bsYearSelector and bsMonthSelector are globally defined in the module script
+        // Global data structure for the current month/global settings
+        let monthlyData = JSON.parse(JSON.stringify(initialData));
 
-        /**
-         * Converts a number to a Nepali-style formatted string (e.g., 100000 -> 1,00,000)
-         * @param {number} num 
-         * @returns {string}
-         */
-        function formatNepaliCurrency(num) {
-            if (typeof num !== 'number' || isNaN(num)) return num;
-            const absoluteNum = Math.abs(num).toFixed(0);
+        // --- LOAN CALCULATION LOGIC ---
+        
+        const calculateEMI = (principal, annualRate, years) => {
+            const rate = annualRate / 12 / 100;
+            const months = years * 12;
+
+            if (principal <= 0 || months <= 0 || rate <= 0) return 0;
+
+            const power = Math.pow(1 + rate, months);
+            const emi = principal * rate * power / (power - 1);
+            return emi;
+        };
+
+        // Function to calculate loan status up to a target month (amortization logic)
+        const calculateLoanStatus = (config, targetYearBs, targetMonthBs) => {
             
-            let result = '';
-            if (absoluteNum.length > 3) {
-                let lastThree = absoluteNum.substring(absoluteNum.length - 3);
-                let otherNumbers = absoluteNum.substring(0, absoluteNum.length - 3);
+            const totalMonths = config.years * 12;
+            if (totalMonths === 0 || config.principal <= 0) {
+                return {
+                    emi: 0, startBalance: 0, endBalance: 0, interestPaid: 0, principalPaid: 0, extraPrincipal: 0,
+                    paymentsMadeTotal: 0, paymentsRemaining: 0, currentOutstandingBalance: 0, isPaidOff: true
+                };
+            }
+            
+            const emi = calculateEMI(config.principal, config.rate, config.years);
+            const monthlyRate = config.rate / 12 / 100;
+            const extraPrincipalForThisMonth = config.extraPrincipal || 0;
+            
+            let currentBalance = config.principal;
+            let totalPaymentsMade = 0;
+            
+            const startMonthKey = config.startDateYear * 12 + config.startDateMonth;
+            const targetMonthKey = targetYearBs * 12 + targetMonthBs;
+            
+            // 1. Calculate the starting balance for the target month
+            for (let currentKey = startMonthKey; currentKey < targetMonthKey; currentKey++) {
                 
-                result = otherNumbers.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + lastThree;
-            } else {
-                result = absoluteNum;
-            }
+                if (currentBalance <= 0.01) {
+                    currentBalance = 0;
+                    break;
+                }
+                
+                // Determine which month this loop iteration represents in the loan's life
+                const currentLoanMonthIndex = currentKey - startMonthKey + 1;
 
-            return (num < 0 ? '-' : '') + result;
-        }
-
-        /**
-         * Calculates the total income, total expense, and net flow, and triggers auto-save.
-         */
-        function calculateTotals() {
-            let totalIncome = 0;
-            let totalExpense = 0;
-
-            incomeList.querySelectorAll('input[type="number"]').forEach(input => {
-                const amount = parseFloat(input.value) || 0;
-                totalIncome += amount;
-            });
-
-            expenseList.querySelectorAll('input[type="number"]').forEach(input => {
-                const amount = parseFloat(input.value) || 0;
-                totalExpense += amount;
-            });
-
-            const netFlow = totalIncome - totalExpense;
-
-            // Update DOM
-            totalIncomeEl.textContent = formatNepaliCurrency(totalIncome);
-            totalExpenseEl.textContent = formatNepaliCurrency(totalExpense);
-            netFlowEl.textContent = formatNepaliCurrency(netFlow);
-
-            // Apply styling based on net flow
-            netFlowContainer.className = 'flex justify-between items-center text-xl font-extrabold mt-4 py-3 rounded-lg';
-
-            if (netFlow > 0) {
-                netFlowContainer.classList.add('bg-green-100', 'text-green-700');
-                netFlowEl.classList.add('text-green-700');
-            } else if (netFlow < 0) {
-                netFlowContainer.classList.add('bg-red-100', 'text-red-700');
-                netFlowEl.classList.add('text-red-700');
-            } else {
-                netFlowContainer.classList.add('bg-gray-100', 'text-gray-700');
-                netFlowEl.classList.add('text-gray-700');
+                const interest = currentBalance * monthlyRate;
+                let scheduledPrincipal = emi - interest;
+                
+                // Handle final payment edge case
+                if (emi > currentBalance + interest) {
+                    scheduledPrincipal = currentBalance;
+                }
+                
+                currentBalance -= scheduledPrincipal;
+                totalPaymentsMade++;
             }
             
-            // Trigger save
-            if (window.saveMonthData) {
-                window.saveMonthData();
-            }
-        }
-        window.calculateTotals = calculateTotals;
-
-        /**
-         * Creates an editable list item (row) for income or expense.
-         */
-        function createListItem(type, name, amount) {
-            const row = document.createElement('div');
-            row.className = `flex space-x-2 items-center p-2 ${type}-row`;
-            
-            const nameInput = document.createElement('input');
-            nameInput.type = 'text';
-            nameInput.value = name;
-            nameInput.placeholder = type === 'income' ? 'आम्दानीको स्रोत' : 'खर्च/किस्ताको नाम';
-            nameInput.className = 'input-field p-2 flex-grow w-1/2 focus:ring-2 focus:ring-indigo-500 focus:outline-none';
-            nameInput.oninput = calculateTotals; 
-
-            const amountInput = document.createElement('input');
-            amountInput.type = 'number';
-            amountInput.value = amount;
-            amountInput.min = 0;
-            amountInput.placeholder = 'रकम';
-            amountInput.className = 'input-field p-2 w-1/4 text-right focus:ring-2 focus:ring-indigo-500 focus:outline-none';
-            amountInput.oninput = calculateTotals; 
-
-            const removeButton = document.createElement('button');
-            removeButton.innerHTML = '<svg class="w-5 h-5 text-gray-500 hover:text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3"></path></svg>';
-            removeButton.className = 'p-1 ml-2 transition';
-            removeButton.onclick = () => {
-                row.remove();
-                calculateTotals(); 
+            // 2. Status for the Target Month
+            let status = {
+                emi: emi,
+                startBalance: Math.max(0, currentBalance),
+                endBalance: Math.max(0, currentBalance),
+                interestPaid: 0,
+                principalPaid: 0,
+                extraPrincipal: extraPrincipalForThisMonth,
+                paymentsMadeTotal: totalPaymentsMade,
+                paymentsRemaining: totalMonths - totalPaymentsMade,
+                currentOutstandingBalance: Math.max(0, currentBalance),
+                isPaidOff: currentBalance <= 0.01
             };
 
-            row.appendChild(nameInput);
-            row.appendChild(amountInput);
-            row.appendChild(removeButton);
-
-            return row;
-        }
-
-        /**
-         * Adds a new, empty list item to the specified list.
-         */
-        function addListItem(type) {
-            const listEl = type === 'income' ? incomeList : expenseList;
-            const defaultName = type === 'income' ? 'नयाँ आम्दानी' : 'नयाँ खर्च';
-            const newItem = createListItem(type, defaultName, 0);
-            listEl.appendChild(newItem);
-            calculateTotals(); 
-        }
-        window.addListItem = addListItem; 
-
-        /**
-         * Clears the current lists and populates them with new data.
-         */
-        function populateLists(incomeData, expenseData) {
-            incomeList.innerHTML = '';
-            expenseList.innerHTML = '';
+            if (status.isPaidOff && status.startBalance <= 0.01) {
+                status.paymentsRemaining = 0;
+                status.paymentsMadeTotal = totalMonths;
+                return status;
+            }
             
-            incomeData.forEach(item => {
-                incomeList.appendChild(createListItem('income', item.name, item.amount));
-            });
-            expenseData.forEach(item => {
-                expenseList.appendChild(createListItem('expense', item.name, item.amount));
-            });
+            // Amortization for the current month
+            const interest = status.startBalance * monthlyRate;
+            let scheduledPrincipal = emi - interest;
             
-            calculateTotals(); 
-        }
-        
-        /**
-         * Extracts the current data from the DOM to be saved.
-         */
-        function getCurrentList(type) {
-            const listEl = type === 'income' ? incomeList : expenseList;
-            const data = [];
-            listEl.querySelectorAll('.flex').forEach(row => {
-                const nameInput = row.querySelector('input[type="text"]');
-                const amountInput = row.querySelector('input[type="number"]');
-                if (nameInput && amountInput) {
-                    data.push({
-                        name: nameInput.value,
-                        amount: parseFloat(amountInput.value) || 0
-                    });
+            if (emi >= status.startBalance + interest) {
+                scheduledPrincipal = status.startBalance;
+                status.endBalance = 0;
+            } else {
+                status.endBalance -= scheduledPrincipal;
+            }
+            
+            // Apply payments
+            status.interestPaid = interest;
+            
+            // Apply extra principal
+            status.endBalance -= status.extraPrincipal;
+            status.principalPaid = scheduledPrincipal + status.extraPrincipal;
+            
+            if (status.endBalance < 0) {
+                status.endBalance = 0;
+            }
+            
+            if (status.startBalance > 0.01) {
+                status.paymentsMadeTotal = totalPaymentsMade + 1;
+            }
+            status.paymentsRemaining = Math.max(0, totalMonths - status.paymentsMadeTotal);
+
+            status.currentOutstandingBalance = status.endBalance;
+            
+            return status;
+        };
+
+
+        // --- UI RENDER FUNCTIONS ---
+
+        // Main function to calculate all totals (Income, Expense, Loans)
+        window.calculateTotals = function() {
+            const incomeRows = document.querySelectorAll('#incomeList [data-amount]');
+            const expenseRows = document.querySelectorAll('#expenseList [data-amount]');
+            
+            let totalIncome = 0;
+            incomeRows.forEach(input => totalIncome += parseFloat(input.value) || 0);
+
+            let totalExpense = 0;
+            expenseRows.forEach(input => totalExpense += parseFloat(input.value) || 0);
+
+            // Calculate total loan metrics dynamically
+            let totalPrincipalReduction = 0;
+            let totalOutstanding = 0;
+            let totalScheduledEMI = 0;
+            let maxPaymentsRemaining = 0; // Changed to track max
+
+            monthlyData.loans.forEach(loan => {
+                const status = calculateLoanStatus(loan, currentYearBs, currentMonthBs);
+                totalPrincipalReduction += status.principalPaid;
+                totalOutstanding += status.currentOutstandingBalance;
+                totalScheduledEMI += status.emi;
+                
+                // Track the maximum remaining payments (longest loan)
+                if (status.paymentsRemaining > maxPaymentsRemaining) {
+                    maxPaymentsRemaining = status.paymentsRemaining;
                 }
             });
-            return data;
-        }
 
-        /**
-         * Exports the current month's data as a CSV file for manual backup.
-         */
-        window.exportDataAsCSV = function() {
-            const monthKey = getMonthKey();
-            const incomeData = getCurrentList('income');
-            const expenseData = getCurrentList('expense');
+            const netCashFlow = totalIncome - totalExpense;
 
-            let csvContent = "data:text/csv;charset=utf-8,";
-            
-            // Get Nepali month name for display
-            const bsYear = monthKey.split('-')[0];
-            const bsMonthIndex = parseInt(monthKey.split('-')[1]) - 1;
-            const monthName = nepaliMonths[bsMonthIndex];
-            
-            csvContent += `महिना,B.S. ${bsYear} ${monthName}\n`;
-            csvContent += "खण्ड,स्रोत/नाम,रकम\n";
-            
-            incomeData.forEach(item => {
-                csvContent += `आम्दानी,${item.name.replace(/,/g, ' ')},${item.amount}\n`; 
-            });
+            // Update UI for Cash Flow
+            document.getElementById('totalIncome').textContent = `₹ ${totalIncome.toFixed(2)}`;
+            document.getElementById('totalExpense').textContent = `₹ ${totalExpense.toFixed(2)}`;
+            document.getElementById('totalPrincipalReduction').textContent = `₹ ${totalPrincipalReduction.toFixed(2)}`; 
+            document.getElementById('netCashFlow').textContent = `₹ ${netCashFlow.toFixed(2)}`;
 
-            csvContent += "\n";
-            csvContent += "खण्ड,स्रोत/नाम,रकम\n";
+            // Update UI for Loan Summary
+            document.getElementById('totalOutstandingBalance').textContent = `₹ ${totalOutstanding.toFixed(2)}`;
+            document.getElementById('totalScheduledEMI').textContent = `₹ ${totalScheduledEMI.toFixed(2)}`;
+            document.getElementById('totalPaymentsRemaining').textContent = maxPaymentsRemaining; 
             
-            expenseData.forEach(item => {
-                csvContent += `खर्च,${item.name.replace(/,/g, ' ')},${item.amount}\n`;
-            });
-
-            const encodedUri = encodeURI(csvContent);
-            const fileName = `Financial_Data_BS_${bsYear}_${monthName.split(' ')[0]}.csv`;
-            
-            const link = document.createElement("a");
-            link.setAttribute("href", encodedUri);
-            link.setAttribute("download", fileName);
-            document.body.appendChild(link); 
-            link.click();
-            document.body.removeChild(link);
-            
-            syncStatusEl.textContent = `डाटा Export सफल! ${fileName} डाउनलोड भयो।`;
-        }
-
-        /**
-         * Calculates the consolidation savings based on static scenario values.
-         */
-        function calculateConsolidation() {
-            const currentBurden = 77000; 
-            const proposedBurden = parseFloat(document.getElementById('proposedNewLoan').value) > 0 ? 44000 : 0; 
-
-            document.getElementById('currentMonthlyBurden').textContent = formatNepaliCurrency(currentBurden);
-            document.getElementById('proposedMonthlyBurden').textContent = formatNepaliCurrency(proposedBurden);
-            
-            const saving = currentBurden - proposedBurden;
-            monthlySavingEl.textContent = formatNepaliCurrency(saving);
-
-            monthlySavingEl.parentElement.classList.remove('bg-red-100', 'text-red-700', 'bg-indigo-100', 'text-indigo-700');
-            if (saving > 0) {
-                monthlySavingEl.parentElement.classList.add('bg-indigo-100', 'text-indigo-700');
+            if (netCashFlow >= 0) {
+                document.getElementById('netCashFlow').classList.remove('text-primary-red');
+                document.getElementById('netCashFlow').classList.add('text-primary-green');
             } else {
-                 monthlySavingEl.parentElement.classList.add('bg-red-100', 'text-red-700');
+                document.getElementById('netCashFlow').classList.remove('text-primary-green');
+                document.getElementById('netCashFlow').classList.add('text-primary-red');
+            }
+            
+            // Auto-save data after calculation
+            window.saveMonthData(); 
+            window.saveLoanConfigData();
+        }
+        
+        // Function to create an input row (for income/expense)
+        const createInputRow = (listId, item) => {
+            const container = document.getElementById(listId);
+            if (!container) return; // Safety check
+            const div = document.createElement('div');
+            div.className = 'flex items-center space-x-2 input-row mb-2';
+            div.innerHTML = `
+                <input type="text" class="flex-grow p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-sm" 
+                       value="${item.name || ''}" placeholder="शिर्षक" oninput="window.saveMonthData()" data-name>
+                <input type="number" class="w-24 p-2 border border-gray-300 rounded-lg text-sm text-right focus:ring-blue-500 focus:border-blue-500" 
+                       value="${item.amount || 0}" placeholder="रकम" oninput="window.calculateTotals()" data-amount>
+                <button onclick="window.removeRow(this, '${listId}')" class="p-2 text-red-500 hover:text-red-700 transition duration-150">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                      <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm4 0a1 1 0 10-2 0v6a1 1 0 102 0V8z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+            `;
+            container.appendChild(div);
+        }
+        
+        // Function to remove an input row
+        window.removeRow = function(button, listId) {
+            const row = button.closest('.input-row');
+            if (row) {
+                row.remove();
+                window.calculateTotals(); 
             }
         }
-        window.calculateConsolidation = calculateConsolidation; 
+        
+        // Function to add a new empty row
+        window.addRow = function(listId) {
+             const newItem = { name: "नयाँ शीर्षक", amount: 0 };
+             if (listId === 'incomeList') {
+                 monthlyData.incomes.push(newItem);
+             } else {
+                 monthlyData.expenses.push(newItem);
+             }
+             createInputRow(listId, newItem);
+             window.calculateTotals(); 
+        }
+
+        // Function to populate income and expense lists
+        window.populateLists = function(data) {
+            const incomeListEl = document.getElementById('incomeList');
+            const expenseListEl = document.getElementById('expenseList');
+            
+            if(incomeListEl) incomeListEl.innerHTML = '';
+            if(expenseListEl) expenseListEl.innerHTML = '';
+            
+            // Load Cash Flow Data 
+            (data.incomes || initialData.incomes).forEach(item => createInputRow('incomeList', item));
+            (data.expenses || initialData.expenses).forEach(item => createInputRow('expenseList', item));
+            
+            // Render Loans
+            window.renderLoans(data.loans || initialData.loans);
+
+            // Run calculations after loading data
+            window.calculateTotals();
+        }
+
+        // --- LOAN MANAGEMENT FUNCTIONS ---
+
+        // Saves monthly extra principal and re-calculates all totals
+        window.saveLoanExtraPrincipal = function(element, loanId) {
+            const newExtra = parseFloat(element.value) || 0;
+            const loanIndex = monthlyData.loans.findIndex(l => l.id === loanId);
+
+            if (loanIndex !== -1) {
+                // Update the temporary monthly extra principal value
+                monthlyData.loans[loanIndex].extraPrincipal = newExtra;
+                window.calculateTotals(); // This triggers saveMonthData and saveLoanConfigData
+            }
+        }
+        
+        // Saves the loan configuration details (Principal, Rate, Years, Start Date, Name)
+        window.saveLoanConfigDetail = function(element, loanId, key) {
+            const loanIndex = monthlyData.loans.findIndex(l => l.id === loanId);
+            const value = key === 'name' ? element.value : parseFloat(element.value);
+            
+            if (loanIndex !== -1) {
+                monthlyData.loans[loanIndex][key] = value;
+                // Important: clear extraPrincipal if main configuration changes, as the amortization resets
+                if (key !== 'name') {
+                    monthlyData.loans[loanIndex].extraPrincipal = 0; 
+                    const extraInput = document.querySelector(`#loanCard-${loanId} [data-key="extraPrincipal"]`);
+                    if (extraInput) extraInput.value = '0';
+                }
+                window.renderLoans(monthlyData.loans); // Re-render to update amortization details and totals
+            }
+        }
+
+        window.addLoan = function() {
+            const newLoan = {...initialLoanConfig, id: crypto.randomUUID(), name: `नयाँ ऋण ${monthlyData.loans.length + 1}`};
+            monthlyData.loans.push(newLoan);
+            window.renderLoans(monthlyData.loans);
+            // Scroll to the new loan card
+            setTimeout(() => {
+                const newCard = document.getElementById(`loanCard-${newLoan.id}`);
+                if (newCard) {
+                    newCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            }, 50);
+        }
+
+        window.deleteLoan = function(loanId) {
+             const msgBox = document.createElement('div');
+            msgBox.className = 'fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50';
+            msgBox.innerHTML = `
+                <div class="bg-white p-6 rounded-xl shadow-2xl max-w-sm w-full">
+                    <h3 class="text-lg font-bold mb-3 text-red-600">ऋण मेटाउने पुष्टि गर्नुहोस्</h3>
+                    <p class="text-gray-700">के तपाईं साँच्चै यो ऋण मेटाउन चाहनुहुन्छ? यो कार्य पूर्ववत गर्न सकिँदैन।</p>
+                    <div class="flex justify-end space-x-3 mt-4">
+                        <button onclick="this.closest('.fixed').remove()" class="px-4 py-2 text-sm bg-gray-200 rounded-lg hover:bg-gray-300 transition duration-150">रद्द गर्नुहोस्</button>
+                        <button onclick="window.confirmDeleteLoan('${loanId}'); this.closest('.fixed').remove();" class="px-4 py-2 text-sm bg-red-500 text-white rounded-lg hover:bg-red-600 transition duration-150">निश्चित गर्नुहोस्</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(msgBox);
+        }
+
+        window.confirmDeleteLoan = function(loanId) {
+            monthlyData.loans = monthlyData.loans.filter(l => l.id !== loanId);
+            window.renderLoans(monthlyData.loans);
+        }
+
+
+        window.renderLoans = function(loans) {
+            const container = document.getElementById('loansContainer');
+            if (!container) return; // Add null check for container
+            container.innerHTML = '';
+            
+            loans.forEach((loan, index) => {
+                const status = calculateLoanStatus(loan, currentYearBs, currentMonthBs);
+                container.innerHTML += window.getLoanCardHtml(loan, index + 1, status);
+            });
+            
+            // After rendering, ensure the year/month selectors are populated and values are set
+            window.setLoanDateSelectors(loans);
+            window.calculateTotals(); // Final calculation pass
+        }
+
+        window.setLoanDateSelectors = function(loans) {
+            loans.forEach(loan => {
+                const yearSelect = document.getElementById(`loanStartYear-${loan.id}`);
+                const monthSelect = document.getElementById(`loanStartMonth-${loan.id}`);
+                
+                // If selectors don't exist yet, skip (they will be created on the next render pass)
+                if (!yearSelect || !monthSelect) return; 
+
+                // Clear and repopulate years/months (ensures consistency)
+                yearSelect.innerHTML = '';
+                monthSelect.innerHTML = '';
+
+                const startYear = 2080;
+                const endYear = 2090;
+
+                for (let y = startYear; y <= endYear; y++) {
+                    const option = document.createElement('option');
+                    option.value = y;
+                    option.textContent = y;
+                    yearSelect.appendChild(option);
+                }
+
+                bsMonths.forEach((name, index) => {
+                    const option = document.createElement('option');
+                    option.value = index + 1;
+                    option.textContent = name;
+                    monthSelect.appendChild(option);
+                });
+
+                // Set values based on the loan config
+                yearSelect.value = loan.startDateYear;
+                monthSelect.value = loan.startDateMonth;
+            });
+        }
+
+        window.getLoanCardHtml = (loan, index, status) => {
+            const isPaidOff = status.currentOutstandingBalance <= 0.01;
+            const extraPrincipalForThisMonth = loan.extraPrincipal || 0;
+            const scheduledPrincipal = status.principalPaid - extraPrincipalForThisMonth;
+            
+            const cardBgClass = isPaidOff ? 'bg-green-100 border-green-300' : 'bg-white border-gray-200';
+            const statusText = isPaidOff ? 'ऋण चुक्ता भयो!' : 'सक्रिय';
+            
+            return `
+                <div id="loanCard-${loan.id}" class="p-6 rounded-xl shadow-lg border ${cardBgClass} transition duration-300">
+                    <div class="flex justify-between items-start mb-4 border-b pb-2">
+                        <div class="flex items-center space-x-2">
+                            <h2 class="text-xl font-semibold text-gray-800">
+                                ${index}. 
+                                <input type="text" value="${loan.name}" 
+                                       oninput="window.saveLoanConfigDetail(this, '${loan.id}', 'name')" 
+                                       class="text-xl font-semibold border-b border-dashed border-gray-400 focus:border-blue-500 focus:outline-none p-0.5 rounded-md"
+                                       placeholder="ऋणको नाम">
+                            </h2>
+                            <span class="text-xs font-bold px-2 py-0.5 rounded-full ${isPaidOff ? 'bg-green-500 text-white' : 'bg-blue-500 text-white'}">
+                                ${statusText}
+                            </span>
+                        </div>
+                        <button onclick="window.deleteLoan('${loan.id}')" class="p-1 text-red-500 hover:bg-red-100 rounded-full transition duration-150" title="ऋण मेटाउनुहोस्">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                        </button>
+                    </div>
+                    
+                    <div class="space-y-4">
+                        <!-- Loan Configuration (Inputs) -->
+                        <div class="p-4 rounded-lg bg-blue-50 border border-blue-200">
+                            <h3 class="font-bold text-blue-700 mb-3 text-lg">ऋण विवरण (Configuration)</h3>
+                            <div class="space-y-2">
+                                <div>
+                                    <label for="loanPrincipal-${loan.id}" class="text-xs text-gray-600 block">मूलधन (Principal - ₹)</label>
+                                    <input type="number" id="loanPrincipal-${loan.id}" oninput="window.saveLoanConfigDetail(this, '${loan.id}', 'principal')" class="w-full p-2 border rounded-lg text-sm" value="${loan.principal.toFixed(0)}">
+                                </div>
+                                <div class="flex space-x-2">
+                                    <div class="flex-1">
+                                        <label for="loanRate-${loan.id}" class="text-xs text-gray-600 block">ब्याज दर (Rate - %)</label>
+                                        <input type="number" id="loanRate-${loan.id}" oninput="window.saveLoanConfigDetail(this, '${loan.id}', 'rate')" class="w-full p-2 border rounded-lg text-sm" step="0.1" value="${loan.rate.toFixed(1)}">
+                                    </div>
+                                    <div class="flex-1">
+                                        <label for="loanYears-${loan.id}" class="text-xs text-gray-600 block">अवधि (Years)</label>
+                                        <input type="number" id="loanYears-${loan.id}" oninput="window.saveLoanConfigDetail(this, '${loan.id}', 'years')" class="w-full p-2 border rounded-lg text-sm" value="${loan.years.toFixed(0)}">
+                                    </div>
+                                </div>
+                                <!-- Start Date -->
+                                <div class="pt-2 border-t border-blue-300">
+                                    <label class="text-xs text-gray-600 block mb-1">ऋण सुरु मिति</label>
+                                    <div class="flex space-x-2">
+                                        <select id="loanStartYear-${loan.id}" onchange="window.saveLoanConfigDetail(this, '${loan.id}', 'startDateYear')" class="p-2 border border-blue-300 rounded-lg text-sm bg-white flex-1"></select>
+                                        <select id="loanStartMonth-${loan.id}" onchange="window.saveLoanConfigDetail(this, '${loan.id}', 'startDateMonth')" class="p-2 border border-blue-300 rounded-lg text-sm bg-white flex-1"></select>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mt-3 pt-2 border-t border-blue-300 flex justify-between font-bold text-blue-700">
+                                <span>निश्चित मासिक किस्ता (EMI):</span>
+                                <span>₹ ${status.emi.toFixed(2)}</span>
+                            </div>
+                        </div>
+
+                        <!-- Monthly Tracking & Payment Input -->
+                        <div class="p-4 rounded-lg bg-yellow-50 border border-yellow-200">
+                            <h3 class="font-bold text-yellow-800 mb-3 text-lg">भुक्तानी ट्र्याकिङ (<span class="text-sm font-medium text-gray-700">यस महिनाको लागि: <span id="currentMonthName-loan-${loan.id}"></span></span>)</h3>
+                            <div class="space-y-2">
+                                <div class="flex justify-between text-sm font-medium">
+                                    <span class="text-gray-600">सुरुको बाँकी रकम (Start Balance):</span>
+                                    <span class="text-gray-800 font-bold">₹ ${status.startBalance.toFixed(2)}</span>
+                                </div>
+                                <div class="flex justify-between text-sm text-red-600">
+                                    <span>ब्याज भुक्तानी (Interest Paid):</span>
+                                    <span>₹ ${status.interestPaid.toFixed(2)}</span>
+                                </div>
+                                <div class="flex justify-between text-sm text-green-600">
+                                    <span>तालिकाबद्ध मूलधन (Scheduled Principal):</span>
+                                    <span>₹ ${Math.max(0, scheduledPrincipal).toFixed(2)}</span>
+                                </div>
+                                
+                                <!-- Extra Principal Input -->
+                                <div>
+                                    <label for="extraPrincipal-${loan.id}" class="text-xs text-gray-600 block mt-2">अतिरिक्त मूलधन भुक्तानी (Extra Principal - ₹)</label>
+                                    <input type="number" id="extraPrincipal-${loan.id}" 
+                                           oninput="window.saveLoanExtraPrincipal(this, '${loan.id}')" 
+                                           data-key="extraPrincipal"
+                                           class="w-full p-2 border rounded-lg text-sm bg-yellow-100 font-bold" value="${extraPrincipalForThisMonth.toFixed(0)}">
+                                </div>
+                                <div class="flex justify-between text-sm text-primary-blue font-medium pt-1">
+                                    <span>कुल अतिरिक्त मूलधन:</span>
+                                    <span>₹ ${extraPrincipalForThisMonth.toFixed(2)}</span>
+                                </div>
+                            </div>
+                            
+                            <div class="mt-4 pt-3 border-t border-yellow-300 space-y-2">
+                                <div class="flex justify-between text-sm font-medium">
+                                    <span class="text-gray-600">कुल किस्ता भुक्तानी (Total Payments Made):</span>
+                                    <span class="font-bold">${status.paymentsMadeTotal}</span>
+                                </div>
+                                <div class="flex justify-between text-sm font-medium">
+                                    <span class="text-gray-600">बाँकी किस्ता (Remaining Payments):</span>
+                                    <span class="font-bold">${status.paymentsRemaining}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Outstanding Balance Summary -->
+                        <div class="p-4 rounded-lg bg-red-100 border border-red-300 text-center">
+                            <p class="text-sm font-medium text-red-800">अन्तिम बाँकी रकम (Outstanding Balance):</p>
+                            <p class="text-2xl font-extrabold text-red-700 mt-1">₹ ${status.currentOutstandingBalance.toFixed(2)}</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        // --- DATA SAVING AND LOADING ---
+
+        // Function to save monthly data (Income/Expense/Monthly Extra Principal)
+        window.saveMonthData = async function() {
+            const monthKey = `${currentYearBs}-${String(currentMonthBs).padStart(2, '0')}`;
+            
+            // 1. Get current data from UI
+            const incomeList = document.querySelector('#incomeList');
+            const expenseList = document.querySelector('#expenseList');
+
+            if (!incomeList || !expenseList) return; // Add safety check
+
+            monthlyData.incomes = Array.from(incomeList.querySelectorAll('.input-row')).map(row => ({
+                name: row.querySelector('[data-name]').value,
+                amount: parseFloat(row.querySelector('[data-amount]').value) || 0
+            }));
+
+            monthlyData.expenses = Array.from(expenseList.querySelectorAll('.input-row')).map(row => ({
+                name: row.querySelector('[data-name]').value,
+                amount: parseFloat(row.querySelector('[data-amount]').value) || 0
+            }));
+            
+            // 2. Extract only the monthly extra principal payments from the loans array
+            const monthlyLoanData = monthlyData.loans.map(loan => ({
+                id: loan.id,
+                extraPrincipal: loan.extraPrincipal || 0
+            }));
+
+            const dataToSave = {
+                incomes: monthlyData.incomes,
+                expenses: monthlyData.expenses,
+                monthlyLoanData: monthlyLoanData // Only monthly variable part
+            };
+
+
+            if (db) {
+                try {
+                    const docRef = doc(db, getMonthDocPath(currentYearBs, currentMonthBs));
+                    await setDoc(docRef, dataToSave, { merge: true });
+                } catch (e) {
+                    console.error("Firestore Save Error, switching to Local Save:", e);
+                    window.saveLocalData(monthKey, dataToSave);
+                }
+            } else {
+                window.saveLocalData(monthKey, dataToSave);
+            }
+            window.updateSyncStatus('क्लाउड बचत सफल! (साझा डाटा)', 'Success');
+        }
+        
+        // Function to save global loan configuration (Name, Principal, Rate, Years, Start Date)
+        window.saveLoanConfigData = async function() {
+            const loansConfigToSave = monthlyData.loans.map(loan => ({
+                id: loan.id,
+                name: loan.name,
+                principal: loan.principal,
+                rate: loan.rate,
+                years: loan.years,
+                startDateYear: loan.startDateYear,
+                startDateMonth: loan.startDateMonth,
+            }));
+            
+            if (db) {
+                try {
+                    const docRef = doc(db, getLoanConfigDocPath());
+                    await setDoc(docRef, { loans: loansConfigToSave }, { merge: false }); // Overwrite the global list
+                } catch (e) {
+                    console.error("Firestore Loan Config Save Error, switching to Local Save:", e);
+                    localStorage.setItem('gharti_loans_config_global', JSON.stringify(loansConfigToSave));
+                }
+            } else {
+                localStorage.setItem('gharti_loans_config_global', JSON.stringify(loansConfigToSave));
+            }
+        }
+        
+        // Function to load data from Cloud Firestore or Local Storage
+        const loadMonthData = async (year, month) => {
+            const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+            // Fix: Deferring the status update to prevent race condition errors with DOM loading
+            setTimeout(() => window.updateSyncStatus('डाटा लोड गर्दै... (Loading Data...)', 'Loading'), 0);
+            
+            if (window.unsubscribe) {
+                window.unsubscribe();
+            }
+
+            // 1. Load Loan Config (Global/Persistent Data)
+            let loansConfig = initialData.loans;
+            if (db) {
+                 try {
+                    const configDocRef = doc(db, getLoanConfigDocPath());
+                    const configUnsub = onSnapshot(configDocRef, (doc) => {
+                        if (doc.exists() && doc.data().loans && doc.data().loans.length > 0) {
+                            loansConfig = doc.data().loans;
+                        }
+                        // Continue to load monthly data after config is loaded
+                        loadMonthlyDataSnapshot(year, month, loansConfig);
+                    }, (error) => {
+                        console.error("Firestore Config Snapshot Error, falling back to Local:", error);
+                        loadLocalConfigAndMonthly(year, month, monthKey);
+                    });
+                    // Store the config listener to potentially unsubscribe later, though here we prioritize month listener
+                } catch (e) {
+                     loadLocalConfigAndMonthly(year, month, monthKey);
+                }
+
+            } else {
+                loadLocalConfigAndMonthly(year, month, monthKey);
+            }
+        }
+        
+        const loadLocalConfigAndMonthly = (year, month, monthKey) => {
+            try {
+                 const globalLoanConfigString = localStorage.getItem('gharti_loans_config_global');
+                 if (globalLoanConfigString) {
+                     monthlyData.loans = JSON.parse(globalLoanConfigString);
+                 } else {
+                    monthlyData.loans = initialData.loans; // Ensure it initializes if nothing in local storage
+                 }
+            } catch(e) { console.error("Local Config Parse Error:", e); monthlyData.loans = initialData.loans; }
+            
+            // Now load monthly data
+            const monthlyDataString = localStorage.getItem(`gharti_finances_${monthKey}`);
+            loadMonthlyData(monthlyDataString);
+            // FIX: Wrap synchronous status update to allow DOM to render.
+            setTimeout(() => window.updateSyncStatus(`${monthKey} को डाटा Local Storage बाट लोड भयो। (Local Storage मोड)`, 'Local'), 0);
+        }
+
+        const loadMonthlyDataSnapshot = (year, month, loansConfig) => {
+            const docRef = doc(db, getMonthDocPath(year, month));
+
+            window.unsubscribe = onSnapshot(docRef, (doc) => {
+                let monthlyVariables = {};
+                if (doc.exists()) {
+                    monthlyVariables = doc.data();
+                    window.updateSyncStatus('क्लाउड जडान भयो। (रियल-टाइम अपडेट)', 'Success');
+                } else {
+                    window.updateSyncStatus('नयाँ महिना। बचत गर्न सुरु गर्नुहोस्।', 'Local');
+                }
+                
+                // Merge persistent loans config with monthly variable data (extra principal)
+                monthlyData = { 
+                    incomes: monthlyVariables.incomes || initialData.incomes,
+                    expenses: monthlyVariables.expenses || initialData.expenses,
+                    loans: loansConfig.map(config => {
+                        const monthlyEntry = monthlyVariables.monthlyLoanData?.find(m => m.id === config.id);
+                        return { 
+                            ...config, 
+                            extraPrincipal: monthlyEntry?.extraPrincipal || 0
+                        };
+                    })
+                };
+                
+                window.populateLists(monthlyData);
+            }, (error) => {
+                console.error("Firestore Monthly Snapshot Error, falling back to Local:", error);
+                window.loadLocalData(`${year}-${String(month).padStart(2, '0')}`);
+            });
+        }
+        
+        const loadMonthlyData = (monthlyDataString) => {
+             const monthKey = `${currentYearBs}-${String(currentMonthBs).padStart(2, '0')}`;
+             let monthlyVariables = {};
+             if (monthlyDataString) {
+                 try {
+                     monthlyVariables = JSON.parse(monthlyDataString);
+                 } catch(e) { console.error("Local Data Parse Error:", e); }
+             }
+             
+             // Merge persistent loans config with monthly variable data (extra principal)
+             monthlyData = { 
+                incomes: monthlyVariables.incomes || initialData.incomes,
+                expenses: monthlyVariables.expenses || initialData.expenses,
+                loans: monthlyData.loans.map(config => {
+                    const monthlyEntry = monthlyVariables.monthlyLoanData?.find(m => m.id === config.id);
+                    return { 
+                        ...config, 
+                        extraPrincipal: monthlyEntry?.extraPrincipal || 0
+                    };
+                })
+            };
+
+            window.populateLists(monthlyData);
+        }
+
+        window.loadLocalData = function(monthKey) {
+            const monthlyDataString = localStorage.getItem(`gharti_finances_${monthKey}`);
+            loadMonthlyData(monthlyDataString);
+            window.updateSyncStatus(`${monthKey} को डाटा Local Storage बाट लोड भयो। (Local Storage मोड)`, 'Local');
+        }
+        
+        window.saveLocalData = function(monthKey, data) {
+            try {
+                 localStorage.setItem(`gharti_finances_${monthKey}`, JSON.stringify(data));
+            } catch (e) {
+                console.error("Local Storage Save Failed:", e);
+            }
+        }
+        
+        // --- SYNCHRONIZATION STATUS UPDATE ---
+        window.updateSyncStatus = function(message, type) {
+            const el = document.getElementById('syncStatus');
+            const icon = document.getElementById('syncIcon');
+            
+            // Safety check for null elements
+            if (!el || !icon) {
+                 return;
+            }
+
+            el.textContent = message;
+            
+            // Use setAttribute for full class replacement on SVG/HTML
+            el.setAttribute('class', 'flex items-center space-x-2 font-semibold p-1 rounded-lg');
+            icon.setAttribute('class', 'h-4 w-4'); // Reset base classes on SVG
+
+            let pathD = ''; // To hold the SVG path content
+
+            // Apply type-specific classes and set icon path
+            if (type === 'Loading') {
+                 el.classList.add('text-primary-blue', 'bg-blue-50');
+                 icon.classList.add('animate-spin', 'text-blue-600');
+                 // Loading Icon Path (Spin)
+                 pathD = `M4.332 7.643a1 1 0 01.765-1.896 9 9 0 0011.59 11.59 1 1 0 01-1.897.765l-.007-.008A7 7 0 014.332 7.643zm1.896 5.832a1 1 0 01-.765 1.896 9 9 0 00-11.59-11.59 1 1 0 011.897-.765l.008.007A7 7 0 016.228 13.475z`;
+            } else if (type === 'Success') {
+                 el.classList.add('text-primary-green', 'bg-green-50');
+                 icon.classList.add('text-green-600');
+                 icon.classList.remove('animate-spin');
+                 // Checkmark Icon Path
+                 pathD = `M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z`;
+            } else { // Error, Local, or Default
+                 el.classList.add('text-yellow-600', 'bg-yellow-50');
+                 icon.classList.add('text-yellow-600');
+                 icon.classList.remove('animate-spin');
+                 // Alert Icon Path
+                 pathD = `M8.257 3.099c.924-1.783 3.327-1.783 4.25 0l5.58 10.799c.924 1.783-.34 3.821-2.125 3.821H4.802c-1.784 0-3.049-2.038-2.125-3.821l5.58-10.799zM10 11a1 1 0 100-2 1 1 0 000 2zm0 2a1 1 0 100-2 1 1 0 000 2z`;
+            }
+            
+            icon.innerHTML = `<path fill-rule="evenodd" d="${pathD}" clip-rule="evenodd" />`;
+        }
+
+
+        // --- CALENDAR AND NAVIGATION FUNCTIONS (unchanged) ---
+
+        const getTodayBs = () => {
+             // Approximation of current date
+             const now = new Date();
+             const currentBsYear = 2082; // Using 2082 as base year for approximation
+             const currentBsMonth = 1; // Assuming Baisakh (01) starts roughly in April
+             
+             // This is a simple approximation and should be replaced by a proper BS converter for production
+             return { year: currentBsYear, month: currentBsMonth };
+        }
+        
+        window.changeMonth = function() {
+            currentYearBs = parseInt(document.getElementById('bsYear').value);
+            currentMonthBs = parseInt(document.getElementById('bsMonth').value);
+            loadMonthData(currentYearBs, currentMonthBs);
+        }
+
+        window.navigateMonth = function(direction) {
+            let newYear = currentYearBs;
+            let newMonth = currentMonthBs + direction;
+
+            if (newMonth < 1) {
+                newMonth = 12;
+                newYear -= 1;
+            } else if (newMonth > 12) {
+                newMonth = 1;
+                newYear += 1;
+            }
+            
+            const yearSelector = document.getElementById('bsYear');
+            const monthSelector = document.getElementById('bsMonth');
+
+            if (yearSelector) yearSelector.value = newYear;
+            if (monthSelector) monthSelector.value = newMonth;
+
+            currentYearBs = newYear;
+            currentMonthBs = newMonth;
+            
+            loadMonthData(currentYearBs, currentMonthBs);
+        }
+
+        const initMonthSelectors = () => {
+            const today = getTodayBs();
+            currentYearBs = today.year;
+            currentMonthBs = today.month;
+
+            const yearSelector = document.getElementById('bsYear');
+            const monthSelector = document.getElementById('bsMonth');
+
+            if (!yearSelector || !monthSelector) return; // Safety check
+
+            const startYear = 2080;
+            const endYear = 2090;
+
+            // Populate Year Selectors
+            for (let y = startYear; y <= endYear; y++) {
+                const option = document.createElement('option');
+                option.value = y;
+                option.textContent = y;
+                yearSelector.appendChild(option.cloneNode(true));
+            }
+
+            // Populate Month Selectors
+            bsMonths.forEach((name, index) => {
+                const option = document.createElement('option');
+                option.value = index + 1;
+                option.textContent = name;
+                monthSelector.appendChild(option.cloneNode(true));
+            });
+
+            // Set default to current estimated BS month/year
+            yearSelector.value = currentYearBs;
+            monthSelector.value = currentMonthBs;
+        }
+
+        // --- AUTHENTICATION AND INITIALIZATION ---
+        
+        // FIX: Renamed initFirebase to window.init and moved the call to body onload
+        window.init = async function() {
+            initMonthSelectors();
+            
+            const familyCodeEl = document.getElementById('familyCodeDisplay');
+            
+            if (firebaseConfig) {
+                try {
+                    const app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+                    
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                    
+                    userId = auth.currentUser?.uid || 'default-shared-user';
+                    
+                    if(familyCodeEl) familyCodeEl.textContent = appId;
+                    // Fix: Deferred status update to ensure DOM elements are fully available.
+                    setTimeout(() => window.updateSyncStatus('क्लाउड जडान भयो। (Shared Data)', 'Success'), 0);
+
+                } catch (error) {
+                    console.error("Firebase Initialization Error:", error);
+                    db = null;
+                    if(familyCodeEl) familyCodeEl.textContent = 'LOCAL-MODE';
+                    // Fix: Deferred status update for error case.
+                    setTimeout(() => window.updateSyncStatus('त्रुटि: क्लाउड जडान टुट्यो। (Local Storage मोड)', 'Error'), 0);
+                }
+            } else {
+                db = null;
+                userId = MANUAL_FAMILY_ID;
+                if(familyCodeEl) familyCodeEl.textContent = MANUAL_FAMILY_ID || 'LOCAL-MODE';
+                // Fix: Deferred status update for missing config case.
+                setTimeout(() => window.updateSyncStatus('त्रुटि: Firebase कन्फिग हराइरहेको छ। (Local Storage मोड)', 'Error'), 0);
+            }
+            
+            loadMonthData(currentYearBs, currentMonthBs);
+        }
+        
+        // Utility for message boxes
+        window.showMessage = function(title, message, buttonText = "बन्द गर्नुहोस्", buttonClass = "bg-primary-blue hover:bg-blue-600") {
+             const msgBox = document.createElement('div');
+            msgBox.className = 'fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50';
+            msgBox.innerHTML = `
+                <div class="bg-white p-6 rounded-xl shadow-2xl max-w-sm w-full">
+                    <h3 class="text-lg font-bold mb-3">${title}</h3>
+                    <p class="text-gray-700">${message}</p>
+                    <button onclick="this.closest('.fixed').remove()" class="mt-4 w-full text-white py-2 rounded-lg transition duration-150 ${buttonClass}">${buttonText}</button>
+                </div>
+            `;
+            document.body.appendChild(msgBox);
+        }
+
+        window.viewSource = function() {
+            window.showMessage("जानकारी", "यो फाइल एक सहयोगी प्लेटफर्म भित्र चल्दैछ। स्रोत कोड हेर्नका लागि तपाईंले कोड एडिटर ट्याबमा जानुहोस्।", "ठीक छ");
+        }
+        
+        window.exportData = function() {
+            window.showMessage("डाटा निर्यात", "यो कार्यक्षमता विकास अन्तर्गत छ।", "ठीक छ", "bg-primary-green hover:bg-green-600");
+        }
+        
+        // --- FINAL DOM INITIALIZATION ---
+        // Ensure window.init runs only after the full DOM is loaded and elements are available.
+        document.addEventListener('DOMContentLoaded', window.init);
+
 
     </script>
+</head>
+<body class="bg-gray-50 min-h-screen p-4 sm:p-8 font-[Inter]">
+    <style>
+        /* Custom styles for appearance */
+        .text-primary-blue { color: #1c64f2; }
+        .bg-primary-blue { background-color: #1c64f2; }
+        .text-primary-green { color: #0e9f6e; }
+        .bg-primary-green { background-color: #0e9f6e; }
+        .text-primary-red { color: #f05252; }
+        
+        /* Ensure inputs and selects within loan cards are visually subtle when not focused */
+        .loan-config-input {
+            transition: all 0.2s;
+        }
+    </style>
+
+    <!-- Header and Status Bar -->
+    <div class="max-w-4xl mx-auto mb-6 bg-white p-4 rounded-xl shadow-lg border border-gray-200">
+        <h1 class="text-xl sm:text-2xl font-bold text-gray-800 mb-2">घर्ती परिवारको वित्तीय व्यवस्थापन ड्यासबोर्ड</h1>
+        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center text-xs text-gray-500 space-y-2 sm:space-y-0">
+            <div id="syncStatus" class="flex items-center space-x-2 font-semibold p-1 rounded-lg">
+                <svg id="syncIcon" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                    <!-- Initial Path (Content is replaced by JS on load based on connection status) -->
+                    <path d="M10 3a7 7 0 100 14 7 7 0 000-14z" clip-rule="evenodd" fill-rule="evenodd"/>
+                </svg>
+                जडानको लागि पर्खँदै...
+            </div>
+            <div class="text-sm font-medium flex items-center space-x-3">
+                <span class="text-gray-600">परिवारको साझा डाटा कोड:</span> 
+                <span id="familyCodeDisplay" class="font-bold text-primary-blue bg-blue-100 px-2 py-0.5 rounded-md shadow-sm select-all">...</span>
+                <button onclick="document.execCommand('copy', false, document.getElementById('familyCodeDisplay').textContent)" class="text-gray-400 hover:text-primary-blue transition duration-150" title="कोड प्रतिलिपि गर्नुहोस्">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M8 5H6a2 2 0 00-2 2v10a2 2 0 002 2h2m0-10h8m-8 0v4m8-4v4m8-4H18a2 2 0 00-2 2v10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2z" />
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="max-w-4xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+        <!-- Monthly Cash Flow Management (Left Column) -->
+        <div class="lg:col-span-2 bg-white p-6 rounded-xl shadow-lg border border-gray-200 h-fit">
+            <h2 class="text-xl sm:text-2xl font-semibold text-gray-800 mb-4 flex items-center justify-between">
+                <span>मासिक नगद प्रवाह व्यवस्थापन</span>
+                <div class="flex items-center space-x-2">
+                    <button onclick="window.viewSource()" class="text-sm font-medium text-gray-500 hover:text-gray-700 transition duration-150 p-1 rounded-md border border-gray-300">
+                        स्रोत
+                    </button>
+                    <button onclick="window.exportData()" class="text-sm font-medium text-primary-green hover:text-green-700 transition duration-150 p-1 rounded-md border border-gray-300">
+                        डाटा निर्यात गर्नुहोस् (CSV)
+                    </button>
+                </div>
+            </h2>
+
+            <!-- Month Selector (Bikram Sambat) -->
+            <div class="flex items-center justify-center space-x-3 mb-4 p-3 bg-blue-50 rounded-xl shadow-inner">
+                <button onclick="window.navigateMonth(-1)" class="p-2 text-blue-700 hover:bg-blue-200 rounded-lg transition duration-150">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+                <select id="bsYear" onchange="window.changeMonth()" class="p-2 border border-blue-300 rounded-lg text-sm bg-white"></select>
+                <select id="bsMonth" onchange="window.changeMonth()" class="p-2 border border-blue-300 rounded-lg text-sm bg-white w-36"></select>
+                <button onclick="window.navigateMonth(1)" class="p-2 text-blue-700 hover:bg-blue-200 rounded-lg transition duration-150">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+            </div>
+            
+            <!-- Income Section -->
+            <div class="mb-6 border-b pb-4">
+                <h3 class="text-lg font-medium text-primary-green mb-3 flex justify-between items-center">
+                    <span>आम्दानी (Income)</span>
+                    <span id="totalIncome" class="text-xl font-bold">₹ 0.00</span>
+                </h3>
+                <div id="incomeList">
+                    <!-- Income rows will be injected here -->
+                </div>
+                <button onclick="window.addRow('incomeList')" class="w-full mt-2 py-2 text-sm text-primary-green border border-primary-green rounded-lg hover:bg-green-50 transition duration-150 flex items-center justify-center space-x-1">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                    </svg>
+                    <span>आयको स्रोत थप्नुहोस्</span>
+                </button>
+            </div>
+
+            <!-- Expense Section -->
+            <div class="mb-6 border-b pb-4">
+                <h3 class="text-lg font-medium text-primary-red mb-3 flex justify-between items-center">
+                    <span>खर्च (Expense)</span>
+                    <span id="totalExpense" class="text-xl font-bold">₹ 0.00</span>
+                </h3>
+                <div id="expenseList">
+                    <!-- Expense rows will be injected here -->
+                </div>
+                <button onclick="window.addRow('expenseList')" class="w-full mt-2 py-2 text-sm text-primary-red border border-primary-red rounded-lg hover:bg-red-50 transition duration-150 flex items-center justify-center space-x-1">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                    </svg>
+                    <span>खर्चको शीर्षक थप्नुहोस्</span>
+                </button>
+            </div>
+
+            <!-- Summary -->
+            <div class="space-y-3 pt-4">
+                <div class="flex justify-between items-center text-lg font-medium">
+                    <span class="text-gray-600">कुल मासिक मूलधन कटौती (Total Principal Reduction):</span>
+                    <span id="totalPrincipalReduction" class="text-primary-blue font-bold">₹ 0.00</span>
+                </div>
+                <div class="flex justify-between items-center text-xl font-extrabold p-3 rounded-lg shadow-inner bg-gray-100">
+                    <span class="text-gray-800">शुद्ध नगद प्रवाह (Net Cash Flow):</span>
+                    <span id="netCashFlow" class="text-green-600">₹ 0.00</span>
+                </div>
+            </div>
+
+            <!-- Month Navigation at Bottom -->
+            <div class="flex justify-between mt-6 pt-4 border-t border-gray-200">
+                <button onclick="window.navigateMonth(-1)" class="flex items-center px-4 py-2 bg-gray-200 rounded-lg text-gray-700 hover:bg-gray-300 transition duration-150 text-sm font-medium">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
+                    </svg>
+                    अघिल्लो महिना
+                </button>
+                <button onclick="window.navigateMonth(1)" class="flex items-center px-4 py-2 bg-gray-200 rounded-lg text-gray-700 hover:bg-gray-300 transition duration-150 text-sm font-medium">
+                    अर्को महिना
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 ml-1" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+            </div>
+
+        </div>
+        
+        <!-- Loan Tracking Cards (Right Column) -->
+        <div class="lg:col-span-1 space-y-6">
+            
+            <!-- TOTAL LOANS SUMMARY -->
+             <div class="bg-gray-800 text-white p-4 rounded-xl shadow-xl border-4 border-yellow-400 sticky top-0 z-10">
+                <h3 class="text-xl font-extrabold mb-3 flex items-center space-x-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z" />
+                    </svg>
+                    <span>कुल ऋण सारांश</span>
+                </h3>
+                <div class="space-y-2 text-sm">
+                    <div class="flex justify-between items-center border-b border-gray-700 pb-1">
+                        <span class="font-medium">कुल बाँकी रकम (Total Outstanding):</span>
+                        <span id="totalOutstandingBalance" class="text-lg font-bold text-red-400">₹ 0.00</span>
+                    </div>
+                    <div class="flex justify-between items-center border-b border-gray-700 pb-1">
+                        <span class="font-medium">कुल मासिक किस्ता (Total EMI):</span>
+                        <span id="totalScheduledEMI" class="text-lg font-bold text-green-400">₹ 0.00</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="font-medium">बाँकी किस्ता (Longest Remaining):</span>
+                        <span id="totalPaymentsRemaining" class="text-lg font-bold text-yellow-400">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Dynamic Loan Cards Container -->
+            <div id="loansContainer" class="space-y-6">
+                <!-- Loan cards will be rendered here dynamically -->
+            </div>
+            
+            <!-- Add New Loan Button -->
+            <button onclick="window.addLoan()" class="w-full py-3 bg-primary-blue text-white rounded-xl shadow-lg hover:bg-blue-600 transition duration-150 flex items-center justify-center space-x-2 font-semibold">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span>नयाँ ऋण थप्नुहोस्</span>
+            </button>
+
+        </div>
+    </div>
 </body>
 </html>
