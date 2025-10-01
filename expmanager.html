@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="ne">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>घर्ती परिवारको वित्तीय व्यवस्थापन ड्यासबोर्ड (बिक्रम सम्बत्)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        // Firebase Imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // =========================================================================
+        // --- 1. FIREBASE CONFIGURATION & ID MANAGEMENT ---
+        //
+        // NOTE FOR EXTERNAL HOSTING (e.g., GitHub Pages): 
+        // If you host this file directly, the Canvas variables (__app_id, __firebase_config) 
+        // will be undefined. You MUST uncomment and fill in the two manual constants below 
+        // to enable Cloud Firestore sync and define a common Family Code.
+        // =========================================================================
+
+        // --- MANUAL CONFIGURATION FOR EXTERNAL HOSTING ---
+        // const MANUAL_FIREBASE_CONFIG = {
+        //     apiKey: "YOUR_FIREBASE_API_KEY",
+        //     authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+        //     projectId: "YOUR_PROJECT_ID",
+        //     // Add other config keys (storageBucket, messagingSenderId, appId) if needed
+        // };
+        // const MANUAL_FAMILY_ID = "GHARTI-FAMILY-DATA"; // Use a custom code for your family
+        // const MANUAL_AUTH_TOKEN = null; // No custom auth token needed for public access
+
+        // --- CANVAS PROVIDED CONFIGURATION (Default) ---
+        const canvasAppId = typeof __app_id !== 'undefined' ? __app_id : null;
+        const canvasFirebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const canvasAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Determine which set of configurations to use
+        const useManualConfig = typeof MANUAL_FIREBASE_CONFIG !== 'undefined' && MANUAL_FIREBASE_CONFIG.projectId;
+        
+        const familyId = useManualConfig 
+            ? MANUAL_FAMILY_ID 
+            : canvasAppId || 'local-app-id'; // Use canvas ID or local fallback
+
+        const firebaseConfig = useManualConfig 
+            ? MANUAL_FIREBASE_CONFIG 
+            : canvasFirebaseConfig;
+
+        const initialAuthToken = useManualConfig
+            ? MANUAL_AUTH_TOKEN
+            : canvasAuthToken;
+
+
+        // --- Global Firebase & Auth Setup ---
+        let app, db, auth;
+        let currentUserId = null;
+        let isAuthReady = false;
+        let unsubscribeSnapshot = null;
+        let saveTimeout = null;
+        let isLocalMode = false; 
+        
+        const syncStatusEl = document.getElementById('syncStatus');
+        const bsYearSelector = document.getElementById('bsYearSelector');
+        const bsMonthSelector = document.getElementById('bsMonthSelector');
+        const familyCodeDisplayEl = document.getElementById('familyCodeDisplay'); 
+
+        // Display the calculated Family ID
+        if (familyCodeDisplayEl) {
+            familyCodeDisplayEl.textContent = familyId.toUpperCase();
+        }
+        
+        /**
+         * Generates the unique internal key (BS_YYYY-MM_Index) for Firestore/LocalStorage.
+         * @returns {string} The unique month key (e.g., '2082-01')
+         */
+        function getMonthKey() {
+            const year = bsYearSelector.value;
+            // Month index is 0-11, so we add 1 and pad to 2 digits (01-12)
+            const monthIndex = parseInt(bsMonthSelector.value) + 1;
+            const monthKey = `${year}-${monthIndex.toString().padStart(2, '0')}`;
+            return monthKey;
+        }
+
+        /**
+         * Initializes Firebase and authenticates the user.
+         */
+        async function initFirebase() {
+            if (Object.keys(firebaseConfig).length === 0 || !firebaseConfig.projectId) {
+                console.warn("Running in local mode: Firebase configuration missing. Data will be saved to localStorage.");
+                isAuthReady = true; 
+                isLocalMode = true; 
+                currentUserId = 'local_user'; 
+                syncStatusEl.textContent = 'त्रुटि: Firebase कन्फिग हराइरहेको छ। (Local Storage मोड)';
+                window.loadMonthData(getMonthKey()); 
+                return; 
+            }
+            
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    // Use anonymous sign-in for public/unauthenticated access
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        currentUserId = user.uid;
+                        isAuthReady = true;
+                        // Status message updated to reflect shared data
+                        syncStatusEl.textContent = 'क्लाउड जडान भयो। (साझा डाटा)'; 
+                        window.loadMonthData(getMonthKey());
+                    } else {
+                        currentUserId = crypto.randomUUID(); 
+                        isAuthReady = true;
+                        syncStatusEl.textContent = 'अतिथि मोडमा जडान भयो।';
+                        window.loadMonthData(getMonthKey());
+                    }
+                });
+
+            } catch (error) {
+                console.error("Error initializing Firebase or signing in:", error);
+                syncStatusEl.textContent = 'जडान असफल: ' + error.message;
+            }
+        }
+        
+        // --- LOCAL STORAGE Data Management ---
+
+        function saveLocalData(monthKey) {
+            const dataToSave = { income: getCurrentList('income'), expense: getCurrentList('expense') };
+            try {
+                const storageKey = `fm_data_${monthKey}`;
+                localStorage.setItem(storageKey, JSON.stringify(dataToSave));
+                // Status message update to ensure consistency
+                const yearMonthDisplay = monthKey.substring(0, 7); // e.g., '2082-01'
+                syncStatusEl.textContent = `${yearMonthDisplay} को डाटा Local Storage मा बचत भयो।`;
+            } catch (e) {
+                console.error("Error saving to localStorage:", e);
+                syncStatusEl.textContent = 'Local Storage मा बचत असफल।';
+            }
+        }
+
+        function loadLocalData(monthKey) {
+            try {
+                const storageKey = `fm_data_${monthKey}`;
+                const storedData = localStorage.getItem(storageKey);
+                const yearMonthDisplay = monthKey.substring(0, 7); // e.g., '2082-01'
+
+                if (storedData) {
+                    const data = JSON.parse(storedData);
+                    populateLists(data.income || [], data.expense || []);
+                    // Updated status message to match user request: '2082-01 को डाटा Local Storage बाट लोड भयो।'
+                    syncStatusEl.textContent = `${yearMonthDisplay} को डाटा Local Storage बाट लोड भयो।`;
+                } else {
+                    // FIX: If no data is found, load empty lists instead of the same initialData
+                    populateLists([], []); 
+                    syncStatusEl.textContent = `${yearMonthDisplay} को लागि कुनै डाटा फेला परेन। नयाँ प्रविष्टि सुरु गर्नुहोस्।`;
+                }
+            } catch (e) {
+                console.error("Error loading from localStorage:", e);
+                // We keep initialData as a backup if loading fails completely, but not for new months.
+                populateLists(initialData.income, initialData.expense); 
+                syncStatusEl.textContent = 'Local Storage लोड गर्न असफल, पूर्वनिर्धारित डाटा प्रयोग गरियो।';
+            }
+        }
+
+        // --- Firestore Data Management ---
+
+        /**
+         * Gets the Firestore Document Reference for shared family data.
+         * Data path uses the familyId for collaboration among all family members.
+         */
+        function getDocRef(monthKey) {
+            if (!db || isLocalMode) return null; 
+            
+            // Public shared data path: /artifacts/{familyId}/public/data/gharti_finances/{monthKey}
+            const collectionName = 'gharti_finances'; 
+            // We use the familyId (which comes from __app_id or MANUAL_FAMILY_ID) as the top-level artifact ID
+            const docPath = `/artifacts/${familyId}/public/data/${collectionName}/${monthKey}`;
+            const docRef = doc(db, docPath);
+            return { docRef };
+        }
+
+        /**
+         * Saves the current cash flow data to Firestore (or localStorage).
+         */
+        function saveMonthData() {
+            const monthKey = getMonthKey();
+            if (isLocalMode) {
+                saveLocalData(monthKey);
+                return;
+            }
+
+            if (!isAuthReady || !db) {
+                return;
+            }
+            
+            clearTimeout(saveTimeout);
+            saveTimeout = setTimeout(async () => {
+                const docData = getDocRef(monthKey);
+                if (!docData) return;
+                const { docRef } = docData;
+
+                syncStatusEl.textContent = 'क्लाउडमा डाटा बचत गर्दै...';
+                
+                const dataToSave = {
+                    income: getCurrentList('income'),
+                    expense: getCurrentList('expense'),
+                };
+
+                try {
+                    await setDoc(docRef, dataToSave, { merge: true });
+                    syncStatusEl.textContent = 'क्लाउड बचत सफल! (' + new Date().toLocaleTimeString('ne-NP') + ')';
+                } catch (e) {
+                    console.error("Error saving document: ", e);
+                    syncStatusEl.textContent = 'क्लाउड बचत असफल: ' + e.message.substring(0, 50) + '...';
+                }
+            }, 1000); 
+        }
+        window.saveMonthData = saveMonthData; 
+
+        /**
+         * Fetches and listens for real-time data for the given month from Firestore (or localStorage).
+         */
+        window.loadMonthData = function(monthKey) {
+             if (!isAuthReady) {
+                return;
+            }
+            
+            if (isLocalMode) {
+                loadLocalData(monthKey);
+                return;
+            }
+
+            if (unsubscribeSnapshot) {
+                unsubscribeSnapshot();
+                unsubscribeSnapshot = null;
+            }
+
+            const docData = getDocRef(monthKey);
+            if (!docData) return;
+            const { docRef } = docData;
+
+            syncStatusEl.textContent = `B.S. ${monthKey.split('-')[0]} ${nepaliMonths[parseInt(monthKey.split('-')[1]) - 1]} को डाटा क्लाउडबाट लोड गर्दै...`;
+            
+            unsubscribeSnapshot = onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    populateLists(data.income || [], data.expense || []);
+                    syncStatusEl.textContent = `B.S. ${monthKey.split('-')[0]} ${nepaliMonths[parseInt(monthKey.split('-')[1]) - 1]} को साझा डाटा सफलतापूर्वक लोड भयो।`;
+                } else {
+                    console.log(`No data found for ${monthKey}. Starting blank.`);
+                    // FIX: If no data exists, load empty lists instead of the same initialData
+                    populateLists([], []); 
+                    // Do not auto-save. Let the user input data which triggers a save later.
+                    syncStatusEl.textContent = `B.S. ${monthKey.split('-')[0]} ${nepaliMonths[parseInt(monthKey.split('-')[1]) - 1]} को लागि कुनै साझा डाटा फेला परेन। नयाँ महिना सुरु गर्नुहोस्।`;
+                }
+            }, (error) => {
+                console.error("Snapshot error:", error);
+                syncStatusEl.textContent = 'साझा डाटा सुन्न असफल: ' + error.message;
+            });
+        }
+        
+        // --- BIKRAM SAMBAT (BS) UI LOGIC ---
+        
+        const nepaliMonths = [
+            "वैशाख (Baisakh)", "जेठ (Jestha)", "असार (Ashar)", "श्रावण (Shrawan)", 
+            "भदौ (Bhadra)", "असोज (Ashwin)", "कार्तिक (Kartik)", "मंसिर (Mangsir)", 
+            "पुस (Poush)", "माघ (Magh)", "फाल्गुन (Falgun)", "चैत्र (Chaitra)"
+        ];
+
+        /**
+         * Populates the year and month selectors with BS data.
+         */
+        function setupBSSelectors() {
+            // Populate BS Year Selector (from 2075 to 2085)
+            const currentBSYear = 2082; // Assuming current year is 2082 B.S. for initialization
+            const currentBSMonthIndex = 0; // Assuming Baisakh (index 0)
+
+            for (let y = 2075; y <= 2085; y++) {
+                const option = document.createElement('option');
+                option.value = y;
+                option.textContent = y;
+                bsYearSelector.appendChild(option);
+            }
+            bsYearSelector.value = currentBSYear;
+
+            // Populate BS Month Selector
+            nepaliMonths.forEach((month, index) => {
+                const option = document.createElement('option');
+                option.value = index; // Store index 0-11
+                option.textContent = month;
+                bsMonthSelector.appendChild(option);
+            });
+            bsMonthSelector.value = currentBSMonthIndex; // Set default month
+
+            // Add change listener to both selectors
+            const selectorChangeListener = () => {
+                // When month or year changes, load new data
+                if (isAuthReady) {
+                    window.loadMonthData(getMonthKey());
+                }
+            };
+
+            bsYearSelector.addEventListener('change', selectorChangeListener);
+            bsMonthSelector.addEventListener('change', selectorChangeListener);
+        }
+        
+        /**
+         * Changes the selected month and year in the BS selectors.
+         * @param {number} direction - -1 for previous month, 1 for next month.
+         */
+        window.changeMonth = function(direction) {
+            let currentYear = parseInt(bsYearSelector.value);
+            let currentMonthIndex = parseInt(bsMonthSelector.value); // 0 to 11
+
+            let newMonthIndex = currentMonthIndex + direction;
+            let newYear = currentYear;
+            
+            const minYear = 2075;
+            const maxYear = 2085;
+
+            // Handle year rollovers
+            if (newMonthIndex < 0) {
+                newMonthIndex = 11; // December (Chaitra)
+                newYear--;
+            } else if (newMonthIndex > 11) {
+                newMonthIndex = 0; // January (Baisakh)
+                newYear++;
+            }
+            
+            // Check boundaries
+            if (newYear < minYear || newYear > maxYear) {
+                // Show a brief message without using alert/confirm
+                syncStatusEl.textContent = `सिमाना पुग्यो! डाटा ${minYear} देखि ${maxYear} B.S. सम्म मात्र उपलब्ध छ।`;
+                return;
+            }
+
+            // Update selectors. This will automatically trigger the data load via the existing change listener.
+            bsYearSelector.value = newYear;
+            bsMonthSelector.value = newMonthIndex;
+            
+            // Manually trigger load if the change event doesn't fire (sometimes happens when setting .value)
+            if (isAuthReady) {
+                window.loadMonthData(getMonthKey());
+            }
+        }
+        
+        /**
+         * Copies the Family Code (appId) to the clipboard.
+         */
+        window.copyFamilyCode = function() {
+            const code = familyId.toUpperCase(); // Use the determined familyId
+            
+            // Fallback for clipboard API which might not work in iframe
+            try {
+                const el = document.createElement('textarea');
+                el.value = code;
+                document.body.appendChild(el);
+                el.select();
+                document.execCommand('copy');
+                document.body.removeChild(el);
+                syncStatusEl.textContent = `कोड ('${code}') सफलतापूर्वक कपी भयो!`;
+            } catch (err) {
+                syncStatusEl.textContent = 'कपी गर्न असफल भयो, कोडलाई म्यानुअल रूपमा कपी गर्नुहोस्।';
+                console.error('Copy failed:', err);
+            }
+        }
+        
+        /**
+         * Navigates to the file source (placeholder for GitHub/Canvas URL).
+         */
+        window.viewSource = function() {
+            const githubUrl = "YOUR_GITHUB_REPOSITORY_URL_HERE"; // <<< Fill this URL when deploying to GitHub Pages
+
+            if (githubUrl.includes("YOUR_GITHUB_REPOSITORY_URL_HERE")) {
+                syncStatusEl.textContent = "कृपया GitHub मा डिप्लोय गरेपछि यो बटनमा URL भर्नुहोस्!";
+            } else {
+                window.open(githubUrl, '_blank');
+            }
+        }
+
+
+        // Initial setup on DOM load
+        document.addEventListener('DOMContentLoaded', () => {
+            setupBSSelectors(); // Setup the Nepali Calendar UI
+            initFirebase(); // Start Firebase initialization
+            calculateConsolidation(); // Initial consolidation calculation
+        });
+        
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=Mukta:wght@200;300;400;500;600;700;800&display=swap');
+        body {
+            font-family: 'Mukta', 'Inter', sans-serif;
+            background-color: #f7f9fc;
+        }
+        .card {
+            background-color: #ffffff;
+            border-radius: 0.75rem; /* rounded-xl */
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 4px, 6px, 0.05);
+            padding: 1.5rem;
+        }
+        .input-field, .summary-text, select {
+            border-radius: 0.5rem;
+            border: 1px solid #d1d5db;
+            transition: border-color 0.15s ease-in-out;
+        }
+        .input-field:focus, select:focus {
+            border-color: #4f46e5; /* indigo-600 */
+        }
+        .income-row, .expense-row {
+            transition: background-color 0.2s;
+        }
+        .income-row:focus-within, .expense-row:focus-within {
+            background-color: #f0f9ff; /* blue-50 */
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-6 md:p-8">
+
+    <div class="max-w-4xl mx-auto">
+        <h1 class="text-3xl font-bold text-center text-indigo-700 mb-6">घर्ती परिवारको वित्तीय व्यवस्थापन ड्यासबोर्ड</h1>
+        <p class="text-center text-gray-600 mb-4">आम्दानी, खर्च र ऋणको विवरणहरू यहाँ भर्नुहोस्।</p>
+
+        <!-- Control Bar (Family Code, Month Selector, Export, Sync Status) -->
+        <div class="card mb-6 flex flex-col md:flex-row items-center justify-between p-4 bg-white border-b-2 border-indigo-100 space-y-4 md:space-y-0">
+            
+            <!-- Family Sharing Info (Top-left) -->
+            <div class="w-full md:w-1/3 text-center md:text-left">
+                <p class="text-xs text-gray-500 font-semibold mb-1">परिवारको साझा डाटा कोड (Family Code):</p>
+                <div class="flex items-center justify-center md:justify-start space-x-2">
+                    <!-- Family Code Display -->
+                    <span id="familyCodeDisplay" class="font-mono text-base font-extrabold text-purple-700 bg-purple-100 p-1.5 rounded-md border border-purple-300">Loading...</span>
+                    <!-- Copy Button -->
+                    <button onclick="copyFamilyCode()" title="कोड कपी गर्नुहोस्" class="text-gray-500 hover:text-indigo-600 transition duration-150">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-2m-4-6l-7-7m0 0a2 2 0 012.828 0L14 7.172"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 11V7a2 2 0 00-2-2H9a2 2 0 00-2 2v4"></path></svg>
+                    </button>
+                </div>
+                <p class="text-xs text-red-500 mt-1">यो कोड अन्य सदस्यसँग साझा गर्नुहोस्।</p>
+            </div>
+
+            <!-- Bikram Sambat Selectors (Center) -->
+            <div class="flex items-center space-x-2 sm:space-x-4 w-full md:w-1/3 justify-center">
+                <label class="font-bold text-gray-700 whitespace-nowrap">मासिक डाटा (B.S.):</label>
+                <select id="bsYearSelector" class="input-field p-2 text-base font-mono focus:ring-indigo-500 focus:border-indigo-500"></select>
+                <select id="bsMonthSelector" class="input-field p-2 text-base font-mono focus:ring-indigo-500 focus:border-indigo-500"></select>
+            </div>
+            
+            <!-- Export and Sync Status (Right) -->
+            <div class="flex flex-col items-end w-full md:w-1/3 space-y-2">
+                <div class="flex space-x-2">
+                    <!-- Export Button -->
+                    <button onclick="exportDataAsCSV()" class="bg-indigo-500 text-white px-3 py-1.5 rounded-lg hover:bg-indigo-600 transition duration-150 ease-in-out text-sm font-medium">
+                        डाटा निर्यात गर्नुहोस् (CSV)
+                    </button>
+                    <!-- View Source Button (New) -->
+                    <button onclick="viewSource()" id="viewSourceButton" title="फाइलको स्रोत हेर्नुहोस् (GitHub URL भर्नुहोस्)" class="bg-gray-100 text-gray-600 px-3 py-1.5 rounded-lg hover:bg-gray-200 transition duration-150 ease-in-out text-sm font-medium shadow-md">
+                        <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>
+                        स्रोत
+                    </button>
+                </div>
+                <span id="syncStatus" class="text-sm italic text-indigo-500">डाटा जडानको लागि पर्खँदै...</span>
+            </div>
+        </div>
+
+        <!-- Main Grid Layout -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            
+            <!-- Monthly Cash Flow Management -->
+            <div class="lg:col-span-2">
+                <div class="card">
+                    <h2 class="text-2xl font-semibold text-gray-800 border-b pb-3 mb-4 text-indigo-600">मासिक आम्दानी र खर्च (Monthly Cash Flow)</h2>
+                    <p class="text-sm text-gray-500 mb-4">तथ्याङ्कहरू परिवर्तन गर्दा **स्वतः गणना र क्लाउडमा बचत** हुनेछ। (Family Code प्रयोग गरी साझा गरिएको डाटा)</p>
+
+                    <div class="flex justify-between font-bold text-lg mb-2 pt-2 border-t">
+                        <span class="w-1/2">शीर्षक</span>
+                        <span class="w-1/2 text-right">रकम (रु.)</span>
+                    </div>
+
+                    <!-- Income Section -->
+                    <h3 class="text-xl font-medium text-green-700 mt-4 mb-2">आम्दानी (Earnings)</h3>
+                    <div id="incomeList" class="space-y-2">
+                        <!-- Income rows will be injected here -->
+                    </div>
+                    <div class="flex justify-end mt-4">
+                        <button onclick="addListItem('income')" class="text-sm text-indigo-600 hover:text-indigo-800 transition duration-150 ease-in-out font-medium">
+                            + आम्दानीको स्रोत थप्नुहोस्
+                        </button>
+                    </div>
+                    
+                    <!-- Expense Section -->
+                    <h3 class="text-xl font-medium text-red-700 mt-6 mb-2 border-t pt-4">खर्च/किस्ताहरू (Liabilities)</h3>
+                    <div id="expenseList" class="space-y-2">
+                        <!-- Expense rows will be injected here -->
+                    </div>
+                    <div class="flex justify-end mt-4">
+                        <button onclick="addListItem('expense')" class="text-sm text-indigo-600 hover:text-indigo-800 transition duration-150 ease-in-out font-medium">
+                            + खर्च/किस्ता थप्नुहोस्
+                        </button>
+                    </div>
+
+                    <!-- Summary -->
+                    <div class="mt-8 pt-4 border-t-2 border-dashed border-gray-300">
+                        <div class="flex justify-between items-center text-lg font-bold text-gray-700 py-2">
+                            <span>जम्मा आम्दानी:</span>
+                            <span id="totalIncome" class="summary-text bg-green-100 p-2 text-green-700">0</span>
+                        </div>
+                        <div class="flex justify-between items-center text-lg font-bold text-gray-700 py-2">
+                            <span>जम्मा खर्च:</span>
+                            <span id="totalExpense" class="summary-text bg-red-100 p-2 text-red-700">0</span>
+                        </div>
+                        <div class="flex justify-between items-center text-xl font-extrabold mt-4 py-3 rounded-lg" id="netFlowContainer">
+                            <span>मासिक बचत/घाटा (Net Cash Flow):</span>
+                            <span id="netFlow" class="summary-text p-3">0</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Month Navigation Buttons at the bottom -->
+                <div class="flex justify-between mt-4 p-4">
+                    <button onclick="changeMonth(-1)" class="flex items-center space-x-2 bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300 transition duration-150 ease-in-out font-medium shadow-md">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                        <span>अघिल्लो महिना</span>
+                    </button>
+                    <button onclick="changeMonth(1)" class="flex items-center space-x-2 bg-indigo-500 text-white px-4 py-2 rounded-lg hover:bg-indigo-600 transition duration-150 ease-in-out font-medium shadow-md">
+                        <span>अर्को महिना</span>
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path></svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Loan Consolidation Proposal (Scenario Analysis) -->
+            <div class="card lg:col-span-2">
+                <h2 class="text-2xl font-semibold text-gray-800 border-b pb-3 mb-4 text-indigo-600">ऋण समायोजन प्रस्ताव (Loan Consolidation Proposal)</h2>
+
+                <div class="space-y-4">
+                    <div class="flex justify-between items-center p-3 rounded-lg bg-yellow-50">
+                        <label for="currentTotalDebt" class="font-medium text-gray-700 w-1/2">हालको जम्मा तिर्नुपर्ने ऋण (रु. 27,25,000/-):</label>
+                        <input type="number" id="currentTotalDebt" value="2725000" class="input-field p-2 w-1/2 text-right" oninput="calculateConsolidation()">
+                    </div>
+
+                    <div class="flex justify-between items-center p-3 rounded-lg bg-yellow-50">
+                        <label for="proposedNewLoan" class="font-medium text-gray-700 w-1/2">प्रस्तावित नयाँ ऋण (रु. 30,00,000/-):</label>
+                        <input type="number" id="proposedNewLoan" value="3000000" class="input-field p-2 w-1/2 text-right" oninput="calculateConsolidation()">
+                    </div>
+                </div>
+
+                <div class="mt-6 pt-4 border-t-2 border-dashed border-gray-300">
+                    <h3 class="text-xl font-medium text-gray-800 mb-4">मासिक किस्ता भारको विश्लेषण:</h3>
+
+                    <div class="flex justify-between items-center py-2">
+                        <span class="font-semibold text-gray-600">हालको अनुमानित मासिक किस्ता भार:</span>
+                        <span id="currentMonthlyBurden" class="font-semibold text-red-600 text-lg">77,000</span>
+                    </div>
+
+                    <div class="flex justify-between items-center py-2">
+                        <span class="font-semibold text-gray-600">प्रस्तावित नयाँ मासिक किस्ता भार:</span>
+                        <span id="proposedMonthlyBurden" class="font-semibold text-green-600 text-lg">44,000</span>
+                    </div>
+
+                    <div class="flex justify-between items-center text-xl font-extrabold mt-4 py-3 rounded-lg" id="monthlySavingContainer">
+                        <span>मासिक बचत (Potential Monthly Saving):</span>
+                        <span id="monthlySaving" class="p-2">33,000</span>
+                    </div>
+                </div>
+
+                <p class="text-sm text-gray-500 mt-4 italic">
+                    <strong class="font-bold">आधार:</strong> हालको भार (रु. 52,000 + ढिकुरी किस्ता रु. 25,000 = रु. 77,000) र नयाँ प्रस्ताव (रु. 44,000) को आधारमा गणना गरिएको।
+                </p>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        // Initial Data - Kept here for reference, but no longer auto-loaded for every new month
+        const initialData = {
+            income: [
+                { name: 'पेन्सन (Pension)', amount: 35000, type: 'income' },
+                { name: 'अन्य आम्दानी (Other Income)', amount: 25000, type: 'income' },
+                { name: 'Gobin (Other Source)', amount: 40000, type: 'income' },
+                { name: 'पसलबाट नाफा (Profit on Sale)', amount: 10000, type: 'income' },
+            ],
+            expense: [
+                { name: 'Global PL + TKK + B&T (मुख्य किस्ता)', amount: 57000, type: 'expense' },
+                { name: 'CYC-1 किस्ता (CYC Installment)', amount: 5000, type: 'expense' },
+                { name: 'भुपु किस्ता (Bhupu Installment)', amount: 28300, type: 'expense' },
+                { name: 'ढिकुरी किस्ता (Dhikuri Installment)', amount: 25000, type: 'expense' },
+                { name: 'समूह NMB किस्ता (Group Loan)', amount: 15000, type: 'expense' },
+                { name: 'घर खर्च (Household Expenses)', amount: 10000, type: 'expense' },
+                { name: 'बिपिन खर्च (Bipin’s Expenses)', amount: 8000, type: 'expense' },
+            ]
+        };
+
+        const incomeList = document.getElementById('incomeList');
+        const expenseList = document.getElementById('expenseList');
+        const totalIncomeEl = document.getElementById('totalIncome');
+        const totalExpenseEl = document.getElementById('totalExpense');
+        const netFlowEl = document.getElementById('netFlow');
+        const netFlowContainer = document.getElementById('netFlowContainer');
+        const monthlySavingEl = document.getElementById('monthlySaving');
+        // Note: bsYearSelector and bsMonthSelector are globally defined in the module script
+
+        /**
+         * Converts a number to a Nepali-style formatted string (e.g., 100000 -> 1,00,000)
+         * @param {number} num 
+         * @returns {string}
+         */
+        function formatNepaliCurrency(num) {
+            if (typeof num !== 'number' || isNaN(num)) return num;
+            const absoluteNum = Math.abs(num).toFixed(0);
+            
+            let result = '';
+            if (absoluteNum.length > 3) {
+                let lastThree = absoluteNum.substring(absoluteNum.length - 3);
+                let otherNumbers = absoluteNum.substring(0, absoluteNum.length - 3);
+                
+                result = otherNumbers.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + lastThree;
+            } else {
+                result = absoluteNum;
+            }
+
+            return (num < 0 ? '-' : '') + result;
+        }
+
+        /**
+         * Calculates the total income, total expense, and net flow, and triggers auto-save.
+         */
+        function calculateTotals() {
+            let totalIncome = 0;
+            let totalExpense = 0;
+
+            incomeList.querySelectorAll('input[type="number"]').forEach(input => {
+                const amount = parseFloat(input.value) || 0;
+                totalIncome += amount;
+            });
+
+            expenseList.querySelectorAll('input[type="number"]').forEach(input => {
+                const amount = parseFloat(input.value) || 0;
+                totalExpense += amount;
+            });
+
+            const netFlow = totalIncome - totalExpense;
+
+            // Update DOM
+            totalIncomeEl.textContent = formatNepaliCurrency(totalIncome);
+            totalExpenseEl.textContent = formatNepaliCurrency(totalExpense);
+            netFlowEl.textContent = formatNepaliCurrency(netFlow);
+
+            // Apply styling based on net flow
+            netFlowContainer.className = 'flex justify-between items-center text-xl font-extrabold mt-4 py-3 rounded-lg';
+
+            if (netFlow > 0) {
+                netFlowContainer.classList.add('bg-green-100', 'text-green-700');
+                netFlowEl.classList.add('text-green-700');
+            } else if (netFlow < 0) {
+                netFlowContainer.classList.add('bg-red-100', 'text-red-700');
+                netFlowEl.classList.add('text-red-700');
+            } else {
+                netFlowContainer.classList.add('bg-gray-100', 'text-gray-700');
+                netFlowEl.classList.add('text-gray-700');
+            }
+            
+            // Trigger save
+            if (window.saveMonthData) {
+                window.saveMonthData();
+            }
+        }
+        window.calculateTotals = calculateTotals;
+
+        /**
+         * Creates an editable list item (row) for income or expense.
+         */
+        function createListItem(type, name, amount) {
+            const row = document.createElement('div');
+            row.className = `flex space-x-2 items-center p-2 ${type}-row`;
+            
+            const nameInput = document.createElement('input');
+            nameInput.type = 'text';
+            nameInput.value = name;
+            nameInput.placeholder = type === 'income' ? 'आम्दानीको स्रोत' : 'खर्च/किस्ताको नाम';
+            nameInput.className = 'input-field p-2 flex-grow w-1/2 focus:ring-2 focus:ring-indigo-500 focus:outline-none';
+            nameInput.oninput = calculateTotals; 
+
+            const amountInput = document.createElement('input');
+            amountInput.type = 'number';
+            amountInput.value = amount;
+            amountInput.min = 0;
+            amountInput.placeholder = 'रकम';
+            amountInput.className = 'input-field p-2 w-1/4 text-right focus:ring-2 focus:ring-indigo-500 focus:outline-none';
+            amountInput.oninput = calculateTotals; 
+
+            const removeButton = document.createElement('button');
+            removeButton.innerHTML = '<svg class="w-5 h-5 text-gray-500 hover:text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3"></path></svg>';
+            removeButton.className = 'p-1 ml-2 transition';
+            removeButton.onclick = () => {
+                row.remove();
+                calculateTotals(); 
+            };
+
+            row.appendChild(nameInput);
+            row.appendChild(amountInput);
+            row.appendChild(removeButton);
+
+            return row;
+        }
+
+        /**
+         * Adds a new, empty list item to the specified list.
+         */
+        function addListItem(type) {
+            const listEl = type === 'income' ? incomeList : expenseList;
+            const defaultName = type === 'income' ? 'नयाँ आम्दानी' : 'नयाँ खर्च';
+            const newItem = createListItem(type, defaultName, 0);
+            listEl.appendChild(newItem);
+            calculateTotals(); 
+        }
+        window.addListItem = addListItem; 
+
+        /**
+         * Clears the current lists and populates them with new data.
+         */
+        function populateLists(incomeData, expenseData) {
+            incomeList.innerHTML = '';
+            expenseList.innerHTML = '';
+            
+            incomeData.forEach(item => {
+                incomeList.appendChild(createListItem('income', item.name, item.amount));
+            });
+            expenseData.forEach(item => {
+                expenseList.appendChild(createListItem('expense', item.name, item.amount));
+            });
+            
+            calculateTotals(); 
+        }
+        
+        /**
+         * Extracts the current data from the DOM to be saved.
+         */
+        function getCurrentList(type) {
+            const listEl = type === 'income' ? incomeList : expenseList;
+            const data = [];
+            listEl.querySelectorAll('.flex').forEach(row => {
+                const nameInput = row.querySelector('input[type="text"]');
+                const amountInput = row.querySelector('input[type="number"]');
+                if (nameInput && amountInput) {
+                    data.push({
+                        name: nameInput.value,
+                        amount: parseFloat(amountInput.value) || 0
+                    });
+                }
+            });
+            return data;
+        }
+
+        /**
+         * Exports the current month's data as a CSV file for manual backup.
+         */
+        window.exportDataAsCSV = function() {
+            const monthKey = getMonthKey();
+            const incomeData = getCurrentList('income');
+            const expenseData = getCurrentList('expense');
+
+            let csvContent = "data:text/csv;charset=utf-8,";
+            
+            // Get Nepali month name for display
+            const bsYear = monthKey.split('-')[0];
+            const bsMonthIndex = parseInt(monthKey.split('-')[1]) - 1;
+            const monthName = nepaliMonths[bsMonthIndex];
+            
+            csvContent += `महिना,B.S. ${bsYear} ${monthName}\n`;
+            csvContent += "खण्ड,स्रोत/नाम,रकम\n";
+            
+            incomeData.forEach(item => {
+                csvContent += `आम्दानी,${item.name.replace(/,/g, ' ')},${item.amount}\n`; 
+            });
+
+            csvContent += "\n";
+            csvContent += "खण्ड,स्रोत/नाम,रकम\n";
+            
+            expenseData.forEach(item => {
+                csvContent += `खर्च,${item.name.replace(/,/g, ' ')},${item.amount}\n`;
+            });
+
+            const encodedUri = encodeURI(csvContent);
+            const fileName = `Financial_Data_BS_${bsYear}_${monthName.split(' ')[0]}.csv`;
+            
+            const link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", fileName);
+            document.body.appendChild(link); 
+            link.click();
+            document.body.removeChild(link);
+            
+            syncStatusEl.textContent = `डाटा Export सफल! ${fileName} डाउनलोड भयो।`;
+        }
+
+        /**
+         * Calculates the consolidation savings based on static scenario values.
+         */
+        function calculateConsolidation() {
+            const currentBurden = 77000; 
+            const proposedBurden = parseFloat(document.getElementById('proposedNewLoan').value) > 0 ? 44000 : 0; 
+
+            document.getElementById('currentMonthlyBurden').textContent = formatNepaliCurrency(currentBurden);
+            document.getElementById('proposedMonthlyBurden').textContent = formatNepaliCurrency(proposedBurden);
+            
+            const saving = currentBurden - proposedBurden;
+            monthlySavingEl.textContent = formatNepaliCurrency(saving);
+
+            monthlySavingEl.parentElement.classList.remove('bg-red-100', 'text-red-700', 'bg-indigo-100', 'text-indigo-700');
+            if (saving > 0) {
+                monthlySavingEl.parentElement.classList.add('bg-indigo-100', 'text-indigo-700');
+            } else {
+                 monthlySavingEl.parentElement.classList.add('bg-red-100', 'text-red-700');
+            }
+        }
+        window.calculateConsolidation = calculateConsolidation; 
+
+    </script>
+</body>
+</html>
