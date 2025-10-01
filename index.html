@@ -14,21 +14,19 @@
         // =========================================================================
         // --- 1. FIREBASE CONFIGURATION & ID MANAGEMENT ---
         //
-        // NOTE FOR EXTERNAL HOSTING (e.g., GitHub Pages): 
-        // If you host this file directly, the Canvas variables (__app_id, __firebase_config) 
-        // will be undefined. You MUST uncomment and fill in the two manual constants below 
-        // to enable Cloud Firestore sync and define a common Family Code.
+        // NOTE: When deployed externally (like GitHub Pages), you MUST uncomment 
+        // and fill in the two manual constants below to enable Cloud Firestore sync.
         // =========================================================================
 
-        // --- MANUAL CONFIGURATION FOR EXTERNAL HOSTING ---
-        // const MANUAL_FIREBASE_CONFIG = {
-        //     apiKey: "YOUR_FIREBASE_API_KEY",
-        //     authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-        //     projectId: "YOUR_PROJECT_ID",
-        //     // Add other config keys (storageBucket, messagingSenderId, appId) if needed
-        // };
-        // const MANUAL_FAMILY_ID = "GHARTI-FAMILY-DATA"; // Use a custom code for your family
-        // const MANUAL_AUTH_TOKEN = null; // No custom auth token needed for public access
+        // 🚨 ACTION REQUIRED: UNCOMMENT AND REPLACE PLACEHOLDERS BELOW! 🚨
+        const MANUAL_FIREBASE_CONFIG = {
+            apiKey: "YOUR_API_KEY", // Replace with your Firebase Web API Key
+            authDomain: "YOUR_PROJECT_ID.firebaseapp.com", // Replace with your Project ID
+            projectId: "YOUR_PROJECT_ID", // Replace with your Project ID
+            // Add other config keys (storageBucket, messagingSenderId, appId) if needed
+        };
+        const MANUAL_FAMILY_ID = "GHARTI-FAMILY-CODE"; // <--- Set a unique family ID/Code here (e.g., 'GHARTI-FAMILY-2082')
+        const MANUAL_AUTH_TOKEN = null; // Leave as null unless you are using a custom auth setup
 
         // --- CANVAS PROVIDED CONFIGURATION (Default) ---
         const canvasAppId = typeof __app_id !== 'undefined' ? __app_id : null;
@@ -36,8 +34,8 @@
         const canvasAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
         // Determine which set of configurations to use
-        const useManualConfig = typeof MANUAL_FIREBASE_CONFIG !== 'undefined' && MANUAL_FIREBASE_CONFIG.projectId;
-        
+        const useManualConfig = typeof MANUAL_FIREBASE_CONFIG !== 'undefined' && MANUAL_FIREBASE_CONFIG.projectId && MANUAL_FIREBASE_CONFIG.projectId !== 'YOUR_PROJECT_ID'; // Added check to ensure it's filled
+
         const familyId = useManualConfig 
             ? MANUAL_FAMILY_ID 
             : canvasAppId || 'local-app-id'; // Use canvas ID or local fallback
@@ -85,8 +83,9 @@
          * Initializes Firebase and authenticates the user.
          */
         async function initFirebase() {
+            // Check if MANUAL config was provided OR if Canvas config is present
             if (Object.keys(firebaseConfig).length === 0 || !firebaseConfig.projectId) {
-                console.warn("Running in local mode: Firebase configuration missing. Data will be saved to localStorage.");
+                console.warn("Running in local mode: Firebase configuration missing or incomplete.");
                 isAuthReady = true; 
                 isLocalMode = true; 
                 currentUserId = 'local_user'; 
@@ -825,4 +824,3 @@
     </script>
 </body>
 </html>
-
